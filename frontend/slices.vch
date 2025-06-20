@@ -1,0 +1,29 @@
+/*
+ * ================================================
+ * Archivo: slices.vch
+ * Lenguaje: VLan Cherry
+ * Autor: 
+ * Fecha: 16/6/2025 22:34:01
+ * Descripción: 
+ * ================================================
+ */
+
+// Programa principal
+function main() {
+    // Declaración de variables
+    var mensaje = "Hola VLan Cherry";
+    var numero = 42;
+    var activo = true;
+    
+    // Salida por consola
+    print(mensaje);
+    print("El número es: " + numero);
+    
+    // Estructura de control
+    if (activo) {
+        print("El programa está funcionando correctamente");
+    }
+}
+
+// Punto de entrada del programa
+main();
