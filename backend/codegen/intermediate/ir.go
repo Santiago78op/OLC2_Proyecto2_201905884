@@ -1,4 +1,3 @@
-// backend/codegen/intermediate/ir.go
 package intermediate
 
 import (

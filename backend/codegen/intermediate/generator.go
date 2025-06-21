@@ -1,4 +1,3 @@
-// backend/codegen/intermediate/generator.go
 package intermediate
 
 import (

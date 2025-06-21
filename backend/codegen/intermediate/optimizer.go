@@ -1,4 +1,3 @@
-// backend/codegen/intermediate/optimizer.go
 package intermediate
 
 import (
