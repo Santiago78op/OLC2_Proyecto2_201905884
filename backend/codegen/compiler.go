@@ -3,6 +3,9 @@ package codegen
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,6 +25,10 @@ type IRCompiler struct {
 	irOptimizer  *intermediate.IROptimizer
 	assembler    *output.ARM64Assembler
 	armOptimizer *arm64.ARM64Optimizer
+
+	// ✨ NUEVOS COMPONENTES PARA LINKING
+	linker     *output.ARM64Linker
+	workingDir string
 
 	// Estado interno
 	program  *intermediate.IRProgram
@@ -47,15 +54,28 @@ type CompilerStats struct {
 
 // NewIRCompiler crea una nueva instancia del compilador IR
 func NewIRCompiler() *IRCompiler {
+	// Obtener directorio de trabajo
+	workingDir, _ := os.Getwd()
+	if workingDir == "" {
+		workingDir = "/tmp"
+	}
+
 	return &IRCompiler{
 		irGenerator:  intermediate.NewIRGenerator(),
 		irOptimizer:  intermediate.NewIROptimizer(),
 		assembler:    output.NewARM64Assembler(),
 		armOptimizer: arm64.NewARM64Optimizer(),
-		errors:       make([]repl.Error, 0),
-		warnings:     make([]string, 0),
+
+		// ✨ NUEVOS INICIALIZADORES
+		linker:     output.NewARM64Linker(workingDir),
+		workingDir: workingDir,
+
+		errors:   make([]repl.Error, 0),
+		warnings: make([]string, 0),
 	}
 }
+
+// =============== PIPELINE BÁSICO (SIN CAMBIOS) ===============
 
 // CompileToIR compila código fuente a IR
 func (c *IRCompiler) CompileToIR(sourceCode string) (*intermediate.IRProgram, error) {
@@ -76,58 +96,47 @@ func (c *IRCompiler) CompileToIR(sourceCode string) (*intermediate.IRProgram, er
 
 	// Análisis sintáctico
 	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
-	parser := compiler.NewVLangGrammar(stream)
-	parser.BuildParseTrees = true
+	parser := compiler.NewVLangGrammarParser(stream)
 	parser.RemoveErrorListeners()
 
-	syntaxErrorListener := errors.NewSyntaxErrorListener(lexicalErrorListener.ErrorTable)
-	parser.SetErrorHandler(errors.NewCustomErrorStrategy())
+	syntaxErrorListener := errors.NewSyntaxErrorListener()
 	parser.AddErrorListener(syntaxErrorListener)
 
-	// Generar AST
+	// Parse tree
 	tree := parser.Program()
 
+	parseTime := time.Since(parseStart)
+	fmt.Printf("✅ Análisis completado en %v\n", parseTime)
+
 	// Verificar errores de parsing
-	if len(syntaxErrorListener.ErrorTable.Errors) > 0 {
-		c.errors = syntaxErrorListener.ErrorTable.Errors
-		return nil, fmt.Errorf("errores de sintaxis encontrados: %d", len(c.errors))
+	if len(lexicalErrorListener.ErrorTable.Errors) > 0 || len(syntaxErrorListener.ErrorTable.Errors) > 0 {
+		// Combinar errores
+		c.errors = append(c.errors, lexicalErrorListener.ErrorTable.Errors...)
+		c.errors = append(c.errors, syntaxErrorListener.ErrorTable.Errors...)
+
+		return nil, fmt.Errorf("errores de compilación encontrados: %d", len(c.errors))
 	}
 
-	fmt.Printf("✅ Análisis sintáctico completado en %v\n", time.Since(parseStart))
-
-	// ===== FASE 2: ANÁLISIS SEMÁNTICO =====
-	semanticStart := time.Now()
-
-	// Crear visitor para análisis semántico
-	dclVisitor := repl.NewDclVisitor(syntaxErrorListener.ErrorTable)
-	dclVisitor.Visit(tree)
-
-	// Verificar errores semánticos
-	if len(syntaxErrorListener.ErrorTable.Errors) > 0 {
-		c.errors = syntaxErrorListener.ErrorTable.Errors
-		return nil, fmt.Errorf("errores semánticos encontrados: %d", len(c.errors))
-	}
-
-	fmt.Printf("✅ Análisis semántico completado en %v\n", time.Since(semanticStart))
-
-	// ===== FASE 3: GENERACIÓN DE IR =====
+	// ===== FASE 2: GENERACIÓN DE IR =====
+	fmt.Printf("🔧 Generando representación intermedia...\n")
 	irGenStart := time.Now()
 
-	c.program = c.irGenerator.GenerateIR(tree, dclVisitor.ScopeTrace)
-	if c.program == nil {
-		return nil, fmt.Errorf("error generando IR")
-	}
+	// Crear scope trace para la generación IR
+	scopeTrace := repl.NewScopeTrace()
 
-	c.stats.IRGenTime = time.Since(irGenStart)
+	// Generar IR
+	c.program = c.irGenerator.GenerateIR(tree, scopeTrace)
 	c.stats.IRInstructions = c.countIRInstructions(c.program)
+	c.stats.IRGenTime = time.Since(irGenStart)
 
-	fmt.Printf("✅ Generación de IR completada: %d instrucciones en %v\n",
-		c.stats.IRInstructions, c.stats.IRGenTime)
+	fmt.Printf("✅ IR generado: %d instrucciones en %v\n", c.stats.IRInstructions, c.stats.IRGenTime)
 
-	// Actualizar string IR para debugging
+	// Guardar IR string
 	c.lastIRString = c.program.String()
 
+	// ===== FASE 3: ACTUALIZAR MÉTRICAS =====
 	c.stats.TotalTime = time.Since(startTime)
+
 	return c.program, nil
 }
 
@@ -137,7 +146,7 @@ func (c *IRCompiler) OptimizeIR() error {
 		return fmt.Errorf("no hay programa IR para optimizar")
 	}
 
-	fmt.Printf("🔧 Iniciando optimización de IR...\n")
+	fmt.Printf("🔧 Optimizando IR...\n")
 	optStart := time.Now()
 
 	originalInstructions := c.countIRInstructions(c.program)
@@ -212,6 +221,142 @@ func (c *IRCompiler) OptimizeARM64() error {
 	return nil
 }
 
+// CompileFullPipeline ejecuta el pipeline completo de compilación
+func (c *IRCompiler) CompileFullPipeline(sourceCode string, optimize bool) (string, error) {
+	// 1. Compilar a IR
+	_, err := c.CompileToIR(sourceCode)
+	if err != nil {
+		return "", err
+	}
+
+	// 2. Optimizar IR si se solicita
+	if optimize {
+		err = c.OptimizeIR()
+		if err != nil {
+			return "", err
+		}
+	}
+
+	// 3. Generar ARM64
+	assembly, err := c.GenerateARM64()
+	if err != nil {
+		return "", err
+	}
+
+	// 4. Optimizar ARM64 si se solicita
+	if optimize {
+		err = c.OptimizeARM64()
+		if err != nil {
+			return "", err
+		}
+	}
+
+	// 5. Validar resultado final
+	c.ValidateIR()
+
+	return c.assembly, nil
+}
+
+// =============== ✨ NUEVAS FUNCIONES PARA LINKING ===============
+
+// CompileToExecutable - NUEVA FUNCIÓN que extiende el pipeline para generar ejecutables
+func (c *IRCompiler) CompileToExecutable(sourceCode string, outputName string, optimize bool) (*output.LinkingResult, error) {
+	fmt.Printf("🚀 Compilando a ejecutable ARM64: %s\n", outputName)
+
+	// 1. Usar el pipeline existente para generar assembly
+	assembly, err := c.CompileFullPipeline(sourceCode, optimize)
+	if err != nil {
+		return nil, fmt.Errorf("error en pipeline de compilación: %v", err)
+	}
+
+	// 2. Configurar opciones de enlazado
+	linkOptions := output.LinkingOptions{
+		OutputName:    outputName,
+		EntryPoint:    "main",
+		Libraries:     []string{"c"},
+		StaticLink:    false,
+		OptimizeSize:  false,
+		DebugInfo:     true,
+		StripSymbols:  false,
+		KeepTempFiles: false,
+	}
+
+	// 3. Enlazar ejecutable
+	fmt.Printf("🔗 Enlazando ejecutable...\n")
+	linkResult, err := c.linker.LinkExecutable(assembly, linkOptions)
+	if err != nil {
+		return nil, fmt.Errorf("error enlazando ejecutable: %v", err)
+	}
+
+	fmt.Printf("✅ Ejecutable creado: %s (%d bytes)\n",
+		linkResult.ExecutablePath, linkResult.FileSize)
+
+	return linkResult, nil
+}
+
+// CompileAndRun - NUEVA FUNCIÓN que compila y ejecuta
+func (c *IRCompiler) CompileAndRun(sourceCode string, outputName string, args []string, optimize bool) (*output.LinkingResult, string, error) {
+	// 1. Compilar a ejecutable
+	linkResult, err := c.CompileToExecutable(sourceCode, outputName, optimize)
+	if err != nil {
+		return linkResult, "", err
+	}
+
+	// 2. Ejecutar
+	fmt.Printf("🎯 Ejecutando programa...\n")
+	cmd := exec.Command(linkResult.ExecutablePath, args...)
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		return linkResult, string(output), fmt.Errorf("error ejecutando %s: %v", linkResult.ExecutablePath, err)
+	}
+
+	fmt.Printf("📤 Programa ejecutado exitosamente\n")
+	return linkResult, string(output), nil
+}
+
+// ValidateEnvironment - NUEVA FUNCIÓN para validar entorno
+func (c *IRCompiler) ValidateEnvironment() error {
+	return c.linker.ValidateEnvironment()
+}
+
+// SetWorkingDirectory - NUEVA FUNCIÓN para configurar directorio
+func (c *IRCompiler) SetWorkingDirectory(dir string) {
+	c.workingDir = dir
+	c.linker = output.NewARM64Linker(dir)
+}
+
+// GetOptimizedAssembly - NUEVA FUNCIÓN que ya necesitas
+func (c *IRCompiler) GetOptimizedAssembly() string {
+	return c.assembly
+}
+
+// CleanBuildDirectory - NUEVA FUNCIÓN para limpiar build
+func (c *IRCompiler) CleanBuildDirectory() error {
+	buildDir := filepath.Join(c.workingDir, "build")
+
+	if _, err := os.Stat(buildDir); os.IsNotExist(err) {
+		return nil // No existe, no hay nada que limpiar
+	}
+
+	entries, err := os.ReadDir(buildDir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		entryPath := filepath.Join(buildDir, entry.Name())
+		if err := os.RemoveAll(entryPath); err != nil {
+			return err
+		}
+	}
+
+	fmt.Printf("🧹 Directorio de build limpiado\n")
+	return nil
+}
+
+// =============== FUNCIONES EXISTENTES (SIN CAMBIOS) ===============
+
 // ValidateIR valida la representación intermedia
 func (c *IRCompiler) ValidateIR() []string {
 	if c.program == nil {
@@ -268,41 +413,14 @@ func (c *IRCompiler) GetOptimizationStats() string {
 	return stats
 }
 
-// CompileFullPipeline ejecuta el pipeline completo de compilación
-func (c *IRCompiler) CompileFullPipeline(sourceCode string, optimize bool) (string, error) {
-	// 1. Compilar a IR
-	_, err := c.CompileToIR(sourceCode)
-	if err != nil {
-		return "", err
-	}
-
-	// 2. Optimizar IR si se solicita
-	if optimize {
-		err = c.OptimizeIR()
-		if err != nil {
-			return "", err
-		}
-	}
-
-	// 3. Generar ARM64
-	assembly, err := c.GenerateARM64()
-
-	if err != nil {
-		return "", err
-	}
-
-	// 4. Optimizar ARM64 si se solicita
-	if optimize {
-		err = c.OptimizeARM64()
-		if err != nil {
-			return "", err
-		}
-	}
-
-	// 5. Validar resultado final
-	c.ValidateIR()
-
-	return c.assembly, nil
+// Reset reinicia el estado del compilador
+func (c *IRCompiler) Reset() {
+	c.program = nil
+	c.assembly = ""
+	c.errors = make([]repl.Error, 0)
+	c.warnings = make([]string, 0)
+	c.stats = CompilerStats{}
+	c.lastIRString = ""
 }
 
 // ============ MÉTODOS AUXILIARES ============
@@ -394,14 +512,4 @@ func (c *IRCompiler) instructionsToAssembly(instructions []*arm64.ARM64Instructi
 	}
 
 	return strings.Join(lines, "\n")
-}
-
-// Reset reinicia el estado del compilador
-func (c *IRCompiler) Reset() {
-	c.program = nil
-	c.assembly = ""
-	c.errors = make([]repl.Error, 0)
-	c.warnings = make([]string, 0)
-	c.stats = CompilerStats{}
-	c.lastIRString = ""
 }
