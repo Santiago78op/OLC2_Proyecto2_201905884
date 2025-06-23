@@ -59,12 +59,13 @@ func (t *ARM64Translator) analyzeVariables(node antlr.ParseTree) {
 	switch ctx := node.(type) {
 	case *compiler.ProgramContext:
 		for _, stmt := range ctx.AllStmt() {
-			fmt.Printf("Analizando declaración: %T\n", stmt.GetText())
+			fmt.Printf("Analizando declaración: %T\n", stmt)
 			t.analyzeVariables(stmt)
 		}
 
 	case *compiler.StmtContext:
 		if ctx.Decl_stmt() != nil {
+			fmt.Printf("Analizando declaración de variable: %T\n", ctx.Decl_stmt())
 			t.analyzeVariables(ctx.Decl_stmt())
 		}
 		if ctx.If_stmt() != nil {
@@ -73,7 +74,14 @@ func (t *ARM64Translator) analyzeVariables(node antlr.ParseTree) {
 		if ctx.For_stmt() != nil {
 			t.analyzeVariables(ctx.For_stmt())
 		}
-
+	case *compiler.ValueDeclContext:
+		// Declaración de variable simple
+		varName := ctx.ID().GetText()
+		if !t.generator.VariableExists(varName) {
+			t.generator.DeclareVariable(varName)
+		} else {
+			t.addError(fmt.Sprintf("Variable '%s' ya está declarada", varName))
+		}
 	case *compiler.MutVarDeclContext:
 		varName := ctx.ID().GetText()
 		if !t.generator.VariableExists(varName) {
@@ -124,6 +132,8 @@ func (t *ARM64Translator) translateNode(node antlr.ParseTree) {
 		t.translateProgram(ctx)
 	case *compiler.StmtContext:
 		t.translateStatement(ctx)
+	case *compiler.ValueDeclContext:
+		t.translateValueDecl(ctx)
 	case *compiler.MutVarDeclContext:
 		t.translateMutVarDecl(ctx)
 	case *compiler.VarAssDeclContext:
@@ -167,6 +177,16 @@ func (t *ARM64Translator) translateStatement(ctx *compiler.StmtContext) {
 }
 
 // === DECLARACIONES DE VARIABLES ===
+func (t *ARM64Translator) translateValueDecl(ctx *compiler.ValueDeclContext) {
+	varName := ctx.ID().GetText()
+	t.generator.Comment(fmt.Sprintf("=== DECLARACIÓN: %s ===", varName))
+
+	// Evaluar la expresión del lado derecho
+	t.translateExpression(ctx.Expression())
+
+	// Guardar el resultado en la variable
+	t.generator.StoreVariable(arm64.X0, varName)
+}
 
 // translateMutVarDecl traduce: mut variable int = 10
 func (t *ARM64Translator) translateMutVarDecl(ctx *compiler.MutVarDeclContext) {
@@ -216,6 +236,8 @@ func (t *ARM64Translator) translateAssignment(ctx *compiler.AssignmentDeclContex
 
 // translateExpression traduce cualquier expresión y deja el resultado en X0
 func (t *ARM64Translator) translateExpression(expr antlr.ParseTree) {
+	fmt.Printf("🔢 Traduciendo expresión: %T = %s\n", expr, expr.GetText())
+
 	switch ctx := expr.(type) {
 	case *compiler.IntLiteralContext:
 		t.translateIntLiteral(ctx)
@@ -224,13 +246,84 @@ func (t *ARM64Translator) translateExpression(expr antlr.ParseTree) {
 	case *compiler.BinaryExprContext:
 		t.translateBinaryExpression(ctx)
 	case *compiler.ParensExprContext:
-		// Expresión entre paréntesis: simplemente traducir la expresión interna
 		t.translateExpression(ctx.Expression())
+	case *compiler.LiteralExprContext:
+		// Procesar el literal interno
+		t.translateExpression(ctx.Literal())
+	case *compiler.LiteralContext:
+		t.translateLiteral(ctx)
 	default:
 		t.addError(fmt.Sprintf("Expresión no implementada: %T", ctx))
-		// Cargar 0 como valor por defecto
 		t.generator.LoadImmediate(arm64.X0, 0)
 	}
+}
+
+// ✅ AGREGAR ESTA FUNCIÓN:
+func (t *ARM64Translator) translateLiteral(ctx *compiler.LiteralContext) {
+	// Primero intentar procesar hijos específicos
+	for i := 0; i < ctx.GetChildCount(); i++ {
+		child := ctx.GetChild(i)
+		if child != nil {
+			switch childCtx := child.(type) {
+			case *compiler.IntLiteralContext:
+				t.translateIntLiteral(childCtx)
+				return
+			case *compiler.FloatLiteralContext:
+				t.translateFloatLiteral(childCtx)
+				return
+			case *compiler.StringLiteralContext:
+				t.translateStringLiteral(childCtx)
+				return
+			case *compiler.BoolLiteralContext:
+				t.translateBoolLiteral(childCtx)
+				return
+			case antlr.ParseTree:
+				// Si es otro tipo de ParseTree, procesar recursivamente
+				t.translateExpression(childCtx)
+				return
+			}
+		}
+	}
+
+	// Fallback: analizar por texto si no se encontró un tipo específico
+	text := ctx.GetText()
+	fmt.Printf("🔍 Procesando literal por texto: %s\n", text)
+
+	if value, err := strconv.Atoi(text); err == nil {
+		t.generator.LoadImmediate(arm64.X0, value)
+	} else {
+		t.generator.LoadImmediate(arm64.X0, 0)
+	}
+}
+
+// ✅ AGREGAR ESTAS FUNCIONES SI NO EXISTEN:
+func (t *ARM64Translator) translateFloatLiteral(ctx *compiler.FloatLiteralContext) {
+	valueStr := ctx.GetText()
+	value, err := strconv.ParseFloat(valueStr, 64)
+	if err != nil {
+		t.addError(fmt.Sprintf("Error convirtiendo flotante: %s", valueStr))
+		value = 0.0
+	}
+	// Por simplicidad, convertir a entero
+	t.generator.LoadImmediate(arm64.X0, int(value))
+}
+
+func (t *ARM64Translator) translateStringLiteral(ctx *compiler.StringLiteralContext) {
+	// Por simplicidad, cargar la longitud de la cadena
+	text := ctx.GetText()
+	if len(text) >= 2 {
+		text = text[1 : len(text)-1] // Quitar comillas
+	}
+	t.generator.LoadImmediate(arm64.X0, len(text))
+}
+
+func (t *ARM64Translator) translateBoolLiteral(ctx *compiler.BoolLiteralContext) {
+	valueStr := ctx.GetText()
+	value := 0
+	if valueStr == "true" {
+		value = 1
+	}
+	t.generator.LoadImmediate(arm64.X0, value)
 }
 
 // translateIntLiteral traduce un literal entero

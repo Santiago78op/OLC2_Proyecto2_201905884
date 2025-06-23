@@ -245,6 +245,7 @@ func executeCode(w http.ResponseWriter, r *http.Request) {
 	if !hasCompilationErrors {
 		fmt.Printf("🔹 Intentando generar código ARM64...\n")
 		arm64Code, arm64Errors, hasValidARM64 = translateToARM64(tree)
+		fmt.Print("Codigo Arm64 \n", arm64Code)
 	} else {
 		arm64Code = ""
 		arm64Errors = []string{"No se puede generar ARM64 debido a errores de compilación"}

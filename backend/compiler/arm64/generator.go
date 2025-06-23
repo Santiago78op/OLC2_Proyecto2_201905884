@@ -235,3 +235,8 @@ func (g *ARM64Generator) PrintVariables() {
 	}
 	g.Comment("=== FIN VARIABLES ===")
 }
+
+// GetVariables retorna todas las variables declaradas (para debug)
+func (g *ARM64Generator) GetVariables() map[string]int {
+	return g.variables
+}
