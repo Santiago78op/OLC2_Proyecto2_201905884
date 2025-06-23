@@ -1,4 +1,3 @@
-// backend/main.go - Integración del sistema IR
 package main
 
 import (
@@ -13,42 +12,22 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 
-	// Importaciones existentes
+	// Importa el paquete de pruebas que contiene la lógica de ejecución
+
 	"main.go/ast"
-	"main.go/codegen"
-	"main.go/codegen/examples"
+	compiler "main.go/compiler" // NUEVA: nuestro traductor ARM64
 	"main.go/cst"
 	"main.go/errors"
-	compiler "main.go/grammar"
+	interpeter "main.go/grammar"
 	"main.go/repl"
 )
 
-// Estructura de configuración para el servidor
-type ServerConfig struct {
-	Port        string `json:"port"`
-	IREnabled   bool   `json:"irEnabled"`
-	DebugMode   bool   `json:"debugMode"`
-	OptimizeIR  bool   `json:"optimizeIR"`
-	ShowIRStats bool   `json:"showIRStats"`
-}
-
-// Configuración global del servidor
-var serverConfig = ServerConfig{
-	Port:        ":8080",
-	IREnabled:   true, // ✨ Habilitar IR por defecto
-	DebugMode:   true,
-	OptimizeIR:  true,
-	ShowIRStats: true,
-}
-
-// Resultado de ejecución extendido con soporte IR
-type ExtendedExecutionResult struct {
-	// Campos existentes
+type executionResult struct {
 	Success         bool                  `json:"success"`
 	Errors          []repl.Error          `json:"errors"`
-	Output          string                `json:"output"`
-	FormattedOutput string                `json:"formattedOutput"`
-	ConsoleMessages []repl.ConsoleMessage `json:"consoleMessages"`
+	Output          string                `json:"output"`          // Output plano para retrocompatibilidad
+	FormattedOutput string                `json:"formattedOutput"` // Output con formato mejorado
+	ConsoleMessages []repl.ConsoleMessage `json:"consoleMessages"` // Mensajes estructurados
 	CSTSvg          string                `json:"cstSvg"`
 	AST             string                `json:"ast"`
 	Symbols         []repl.ReportSymbol   `json:"symbols"`
@@ -56,21 +35,32 @@ type ExtendedExecutionResult struct {
 	ErrorSummary    map[string]int        `json:"errorSummary"`
 	ExecutionTime   int64                 `json:"executionTime"`
 
-	// ✨ Nuevos campos para IR
-	IREnabled       bool     `json:"irEnabled"`
-	IRGenerated     bool     `json:"irGenerated"`
-	IRString        string   `json:"irString,omitempty"`
-	IROptimized     bool     `json:"irOptimized"`
-	IRStats         string   `json:"irStats,omitempty"`
-	IRErrors        []string `json:"irErrors,omitempty"`
-	IRWarnings      []string `json:"irWarnings,omitempty"`
-	OptimizationLog []string `json:"optimizationLog,omitempty"`
+	// NUEVOS CAMPOS PARA ARM64
+	ARM64Code   string   `json:"arm64Code"`   // Código ARM64 generado
+	ARM64Errors []string `json:"arm64Errors"` // Errores de traducción
+	HasARM64    bool     `json:"hasArm64"`    // Si se generó código ARM64
+}
 
-	// Métricas de rendimiento
-	CompilationTime  int64 `json:"compilationTime,omitempty"`
-	OptimizationTime int64 `json:"optimizationTime,omitempty"`
-	ValidationTime   int64 `json:"validationTime,omitempty"`
-	InstructionCount int   `json:"instructionCount,omitempty"`
+// función para traducir a ARM64
+func translateToARM64(tree antlr.ParseTree) (string, []string, bool) {
+	fmt.Printf("🔹 Iniciando traducción a ARM64...\n")
+
+	// Crear el traductor
+	translator := compiler.NewARM64Translator()
+
+	// Traducir el programa
+	arm64Code, errors := translator.TranslateProgram(tree)
+
+	if len(errors) > 0 {
+		fmt.Printf("❌ Errores en traducción ARM64: %d\n", len(errors))
+		for _, err := range errors {
+			fmt.Printf("   - %s\n", err)
+		}
+	} else {
+		fmt.Printf("✅ Traducción ARM64 exitosa\n")
+	}
+
+	return arm64Code, errors, len(errors) == 0
 }
 
 func executeCode(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +74,8 @@ func executeCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fmt.Printf("🔹 Body raw recibido: %s\n", string(bodyBytes))
+
 	if len(bodyBytes) == 0 {
 		fmt.Println("❌ Body está vacío")
 		http.Error(w, "Request body is empty", http.StatusBadRequest)
@@ -91,9 +83,7 @@ func executeCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var requestData struct {
-		Code       string `json:"code"`
-		EnableIR   bool   `json:"enableIR,omitempty"`   // ✨ Opción para habilitar IR
-		OptimizeIR bool   `json:"optimizeIR,omitempty"` // ✨ Opción para optimizar IR
+		Code string `json:"code"`
 	}
 
 	if err := json.Unmarshal(bodyBytes, &requestData); err != nil {
@@ -108,175 +98,16 @@ func executeCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✨ Determinar si usar IR (por defecto o por petición)
-	useIR := serverConfig.IREnabled || requestData.EnableIR
-	optimizeIR := serverConfig.OptimizeIR && requestData.OptimizeIR
-
 	codeString := requestData.Code
-	// Limpiar código
 	for len(codeString) > 0 && (codeString[0] == '\n' || codeString[0] == '\r') {
 		codeString = codeString[1:]
 	}
 
-	fmt.Printf("✅ Código recibido (IR: %v, Optimizar: %v):\n%s\n", useIR, optimizeIR, codeString)
+	fmt.Printf("✅ Código recibido exitosamente:\n%s\n", codeString)
 
-	// =========== EJECUCIÓN CON SOPORTE IR ===========
+	// =========== ANÁLISIS Y EJECUCIÓN ===========
 	startTime := time.Now()
 
-	if useIR {
-		// 🔧 NUEVA RUTA: Procesamiento con IR
-		result := executeWithIR(codeString, optimizeIR, startTime)
-
-		// Enviar respuesta
-		w.WriteHeader(http.StatusOK)
-		if err := json.NewEncoder(w).Encode(result); err != nil {
-			fmt.Printf("❌ Error encoding response: %v\n", err)
-			return
-		}
-
-		fmt.Printf("✅ Respuesta enviada (IR habilitado)\n")
-	} else {
-		// 🏃 RUTA EXISTENTE: Procesamiento tradicional (compatibilidad)
-		result := executeTraditional(codeString, startTime)
-
-		// Enviar respuesta
-		w.WriteHeader(http.StatusOK)
-		if err := json.NewEncoder(w).Encode(result); err != nil {
-			fmt.Printf("❌ Error encoding response: %v\n", err)
-			return
-		}
-
-		fmt.Printf("✅ Respuesta enviada (modo tradicional)\n")
-	}
-}
-
-// ✨ NUEVA FUNCIÓN: Ejecución con soporte IR
-func executeWithIR(codeString string, shouldOptimize bool, startTime time.Time) *ExtendedExecutionResult {
-	result := &ExtendedExecutionResult{
-		IREnabled: true,
-	}
-
-	fmt.Printf("🔧 Procesando con sistema IR...\n")
-
-	// ===== FASE 1: COMPILACIÓN A IR =====
-	compileStart := time.Now()
-
-	irCompiler := codegen.NewIRCompiler()
-	program, err := irCompiler.CompileToIR(codeString)
-
-	compilationTime := time.Since(compileStart)
-	result.CompilationTime = compilationTime.Milliseconds()
-
-	if err != nil {
-		fmt.Printf("❌ Error compilando a IR: %v\n", err)
-		result.Success = false
-		result.IRGenerated = false
-		result.Errors = irCompiler.GetErrors()
-		result.ErrorSummary = getErrorSummary(result.Errors)
-		result.ExecutionTime = time.Since(startTime).Milliseconds()
-		return result
-	}
-
-	result.IRGenerated = true
-	result.IRString = irCompiler.GetIRString()
-
-	// Contar instrucciones
-	instructionCount := 0
-	if program != nil {
-		for _, function := range program.Functions {
-			instructionCount += len(function.Instructions)
-		}
-	}
-	result.InstructionCount = instructionCount
-
-	fmt.Printf("✅ IR generado: %d instrucciones\n", instructionCount)
-
-	// ===== FASE 2: OPTIMIZACIÓN (OPCIONAL) =====
-	if shouldOptimize {
-		optimizeStart := time.Now()
-
-		err = irCompiler.OptimizeIR()
-		optimizationTime := time.Since(optimizeStart)
-		result.OptimizationTime = optimizationTime.Milliseconds()
-
-		if err != nil {
-			fmt.Printf("⚠️ Error optimizando IR: %v\n", err)
-			result.IRErrors = append(result.IRErrors, err.Error())
-		} else {
-			result.IROptimized = true
-			result.IRString = irCompiler.GetIRString() // IR optimizado
-			fmt.Printf("🔧 IR optimizado en %v\n", optimizationTime)
-		}
-	}
-
-	// ===== FASE 3: VALIDACIÓN =====
-	validateStart := time.Now()
-
-	validationErrors := irCompiler.ValidateIR()
-	validationTime := time.Since(validateStart)
-	result.ValidationTime = validationTime.Milliseconds()
-
-	if len(validationErrors) > 0 {
-		result.IRWarnings = validationErrors
-		fmt.Printf("⚠️ %d advertencias de validación IR\n", len(validationErrors))
-	}
-
-	// ===== FASE 4: GENERAR ESTADÍSTICAS =====
-	if serverConfig.ShowIRStats {
-		result.IRStats = irCompiler.GetOptimizationStats()
-	}
-
-	// ===== FASE 5: FALLBACK A INTERPRETACIÓN TRADICIONAL =====
-	// Por ahora, usar el intérprete existente para la ejecución real
-	// TODO: En el futuro, aquí iría la generación de código ARM64
-
-	fmt.Printf("📋 Ejecutando con intérprete tradicional (IR como análisis)...\n")
-
-	traditionalResult := executeTraditionalCore(codeString, startTime)
-
-	// Combinar resultados
-	result.Success = traditionalResult.Success
-	result.Output = traditionalResult.Output
-	result.FormattedOutput = traditionalResult.FormattedOutput
-	result.ConsoleMessages = traditionalResult.ConsoleMessages
-	result.CSTSvg = traditionalResult.CSTSvg
-	result.AST = traditionalResult.AST
-	result.Symbols = traditionalResult.Symbols
-	result.ScopeTrace = traditionalResult.ScopeTrace
-	result.ExecutionTime = time.Since(startTime).Milliseconds()
-
-	// Combinar errores (IR + tradicional)
-	allErrors := append(result.Errors, traditionalResult.Errors...)
-	result.Errors = allErrors
-	result.ErrorSummary = getErrorSummary(allErrors)
-
-	fmt.Printf("✅ Procesamiento con IR completado\n")
-	return result
-}
-
-// 🏃 FUNCIÓN EXISTENTE: Ejecución tradicional (sin cambios)
-func executeTraditional(codeString string, startTime time.Time) *ExtendedExecutionResult {
-	traditionalResult := executeTraditionalCore(codeString, startTime)
-
-	// Convertir a formato extendido
-	return &ExtendedExecutionResult{
-		Success:         traditionalResult.Success,
-		Errors:          traditionalResult.Errors,
-		Output:          traditionalResult.Output,
-		FormattedOutput: traditionalResult.FormattedOutput,
-		ConsoleMessages: traditionalResult.ConsoleMessages,
-		CSTSvg:          traditionalResult.CSTSvg,
-		AST:             traditionalResult.AST,
-		Symbols:         traditionalResult.Symbols,
-		ScopeTrace:      traditionalResult.ScopeTrace,
-		ErrorSummary:    traditionalResult.ErrorSummary,
-		ExecutionTime:   traditionalResult.ExecutionTime,
-		IREnabled:       false,
-	}
-}
-
-// Núcleo de ejecución tradicional (código existente reorganizado)
-func executeTraditionalCore(codeString string, startTime time.Time) *executionResult {
 	// 1. Generar CST Report en paralelo
 	cstChannel := make(chan string, 1)
 	go func() {
@@ -291,13 +122,13 @@ func executeTraditionalCore(codeString string, startTime time.Time) *executionRe
 
 	// 2. Análisis Léxico
 	lexicalErrorListener := errors.NewLexicalErrorListener()
-	lexer := compiler.NewVLangLexer(antlr.NewInputStream(codeString))
+	lexer := interpeter.NewVLangLexer(antlr.NewInputStream(codeString))
 	lexer.RemoveErrorListeners()
 	lexer.AddErrorListener(lexicalErrorListener)
 
 	// 3. Análisis Sintáctico
 	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
-	parser := compiler.NewVLangGrammar(stream)
+	parser := interpeter.NewVLangGrammar(stream)
 	parser.BuildParseTrees = true
 
 	syntaxErrorListener := errors.NewSyntaxErrorListener(lexicalErrorListener.ErrorTable)
@@ -310,6 +141,13 @@ func executeTraditionalCore(codeString string, startTime time.Time) *executionRe
 
 	// Verificar si hubo errores críticos
 	hasCompilationErrors := len(syntaxErrorListener.ErrorTable.Errors) > 0
+
+	fmt.Printf("🔹 Errores de compilación: %d\n", len(syntaxErrorListener.ErrorTable.Errors))
+	if hasCompilationErrors {
+		for _, err := range syntaxErrorListener.ErrorTable.Errors {
+			fmt.Printf("   - %s (Línea %d, Col %d): %s\n", err.GetDisplayName(), err.Line, err.Column, err.Msg)
+		}
+	}
 
 	var replVisitor *repl.ReplVisitor
 	var output string = ""
@@ -342,15 +180,47 @@ func executeTraditionalCore(codeString string, startTime time.Time) *executionRe
 	// 7. Generar AST nativo
 	var finalAST string
 	if tree != nil && !hasCompilationErrors {
-		astNode := ast.GenerateNativeAST(tree)
-		if astNode != nil {
-			finalAST = ast.GenerateASTSVG(astNode)
+		fmt.Println("🌳 Generando AST nativo...")
+
+		// Generar AST con timeout para evitar bloqueos
+		astChannel := make(chan string, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("❌ Error generando AST nativo: %v\n", r)
+					astChannel <- generateErrorAST("Error al generar AST")
+				}
+			}()
+
+			astNode := ast.GenerateNativeAST(tree)
+			if astNode != nil {
+				astChannel <- ast.GenerateASTSVG(astNode)
+			} else {
+				astChannel <- generateErrorAST("No se pudo generar el árbol")
+			}
+		}()
+
+		// Esperar con timeout
+		select {
+		case finalAST = <-astChannel:
+			fmt.Println("✅ AST nativo generado exitosamente")
+		case <-time.After(5 * time.Second):
+			fmt.Println("⏱️ Timeout generando AST")
+			finalAST = generateErrorAST("Timeout al generar AST")
 		}
+	} else {
+		fmt.Println("❌ No se pudo generar el árbol de análisis debido a errores")
+		finalAST = generateErrorAST("Error en análisis sintáctico")
 	}
 
+	// Si no hay CST report pero sí AST nativo, usar el AST nativo
 	if cstReport == "" && finalAST != "" {
 		cstReport = finalAST
 	}
+
+	reportEndTime := time.Now()
+
+	// =========== GENERAR REPORTES ===========
 
 	// Determinar si la ejecución fue exitosa
 	success := !hasCompilationErrors && len(syntaxErrorListener.ErrorTable.Errors) == 0
@@ -362,225 +232,95 @@ func executeTraditionalCore(codeString string, startTime time.Time) *executionRe
 	// Crear resumen de errores
 	errorSummary := syntaxErrorListener.ErrorTable.GetErrorsSummary()
 
-	// Crear resultado
-	return &executionResult{
+	fmt.Printf("🔹 Resumen de errores: %+v\n", errorSummary)
+	fmt.Printf("🔹 Tiempo de interpretación: %v\n", interpretationEndTime.Sub(startTime))
+	fmt.Printf("🔹 Tiempo total: %v\n", reportEndTime.Sub(startTime))
+	fmt.Printf("🔹 Salida: %s\n", output)
+
+	var arm64Code string
+	var arm64Errors []string
+	var hasValidARM64 bool
+
+	// Solo intentar traducir a ARM64 si no hay errores de compilación
+	if !hasCompilationErrors {
+		fmt.Printf("🔹 Intentando generar código ARM64...\n")
+		arm64Code, arm64Errors, hasValidARM64 = translateToARM64(tree)
+	} else {
+		arm64Code = ""
+		arm64Errors = []string{"No se puede generar ARM64 debido a errores de compilación"}
+		hasValidARM64 = false
+	}
+
+	// Crear resultado con información detallada
+	result := executionResult{
 		Success:         success,
 		Errors:          syntaxErrorListener.ErrorTable.Errors,
 		Output:          output,
 		FormattedOutput: formattedOutput,
 		ConsoleMessages: consoleMessages,
-		CSTSvg:          cstReport,
-		AST:             finalAST,
+		CSTSvg:          cstReport, // CST del servicio externo
+		AST:             finalAST,  // AST nativo generado
 		Symbols:         symbols,
 		ScopeTrace:      scopeReport,
 		ErrorSummary:    errorSummary,
 		ExecutionTime:   interpretationEndTime.Sub(startTime).Milliseconds(),
-	}
-}
 
-// ✨ NUEVOS ENDPOINTS PARA IR
-
-// Endpoint para obtener información del sistema IR
-func getIRInfo(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	info := map[string]interface{}{
-		"irEnabled":   serverConfig.IREnabled,
-		"debugMode":   serverConfig.DebugMode,
-		"optimizeIR":  serverConfig.OptimizeIR,
-		"showIRStats": serverConfig.ShowIRStats,
-		"version":     "1.0.0-beta",
-		"capabilities": []string{
-			"IR Generation",
-			"Basic Optimizations",
-			"Constant Folding",
-			"Dead Code Elimination",
-			"Validation",
-			"Metrics Collection",
-		},
-		"supportedOptimizations": []string{
-			"Constant Propagation",
-			"Constant Folding",
-			"Dead Code Elimination",
-			"Redundant Load Removal",
-			"Peephole Optimizations",
-			"Algebraic Simplification",
-		},
+		// NUEVOS CAMPOS ARM64
+		ARM64Code:   arm64Code,
+		ARM64Errors: arm64Errors,
+		HasARM64:    hasValidARM64,
 	}
 
-	json.NewEncoder(w).Encode(info)
-}
-
-// Endpoint para configurar el sistema IR
-func configureIR(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	var config ServerConfig
-	if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+	// Enviar respuesta
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		fmt.Printf("❌ Error encoding response: %v\n", err)
+		http.Error(w, "Error encoding response", http.StatusInternalServerError)
 		return
 	}
 
-	// Actualizar configuración
-	serverConfig.IREnabled = config.IREnabled
-	serverConfig.DebugMode = config.DebugMode
-	serverConfig.OptimizeIR = config.OptimizeIR
-	serverConfig.ShowIRStats = config.ShowIRStats
-
-	fmt.Printf("🔧 Configuración IR actualizada: IR=%v, Debug=%v, Optimize=%v, Stats=%v\n",
-		config.IREnabled, config.DebugMode, config.OptimizeIR, config.ShowIRStats)
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"message": "Configuración actualizada",
-		"config":  serverConfig,
-	})
+	fmt.Printf("✅ Respuesta enviada exitosamente\n")
 }
 
-// Endpoint para ejecutar demo del IR
-func runIRDemo(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	fmt.Printf("🎯 Ejecutando demo del sistema IR...\n")
-
-	// Capturar salida del demo (en una implementación real usaríamos un logger)
-	// Por simplicidad, solo ejecutamos el demo y retornamos estado
-	go examples.RunIRDemo()
-
-	response := map[string]interface{}{
-		"success":   true,
-		"message":   "Demo del sistema IR iniciado",
-		"note":      "Revisa los logs del servidor para ver el output del demo",
-		"timestamp": time.Now().Format(time.RFC3339),
-	}
-
-	json.NewEncoder(w).Encode(response)
+// Función auxiliar para generar AST de error
+func generateErrorAST(errorMsg string) string {
+	return fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" width="600" height="200" viewBox="0 0 600 200">
+		<rect width="600" height="200" fill="#1e1e1e"/>
+		<text x="300" y="90" text-anchor="middle" fill="#ff6b6b" font-family="Arial" font-size="18">
+			⚠️ %s
+		</text>
+		<text x="300" y="120" text-anchor="middle" fill="#cccccc" font-family="Arial" font-size="14">
+			Verifica que el código tenga sintaxis válida
+		</text>
+	</svg>`, errorMsg)
 }
 
-// Endpoint para análisis de código específico con IR
-func analyzeIR(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	var requestData struct {
-		Code      string `json:"code"`
-		Optimize  bool   `json:"optimize"`
-		ShowStats bool   `json:"showStats"`
-		Validate  bool   `json:"validate"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
-		return
-	}
-
-	if requestData.Code == "" {
-		http.Error(w, "Code field is required", http.StatusBadRequest)
-		return
-	}
-
-	// Compilar solo a IR (sin ejecución)
-	irCompiler := codegen.NewIRCompiler()
-	program, err := irCompiler.CompileToIR(requestData.Code)
-
-	result := map[string]interface{}{
-		"success": err == nil,
-	}
-
-	if err != nil {
-		result["error"] = err.Error()
-		result["errors"] = irCompiler.GetErrors()
-	} else {
-		result["irString"] = irCompiler.GetIRString()
-
-		// Optimizar si se solicita
-		if requestData.Optimize {
-			err = irCompiler.OptimizeIR()
-			if err != nil {
-				result["optimizationError"] = err.Error()
-			} else {
-				result["optimized"] = true
-				result["irStringOptimized"] = irCompiler.GetIRString()
-			}
-		}
-
-		// Estadísticas si se solicitan
-		if requestData.ShowStats {
-			result["stats"] = irCompiler.GetOptimizationStats()
-		}
-
-		// Validación si se solicita
-		if requestData.Validate {
-			validationErrors := irCompiler.ValidateIR()
-			result["validationErrors"] = validationErrors
-			result["valid"] = len(validationErrors) == 0
-		}
-
-		// Información básica del programa
-		if program != nil {
-			instructionCount := 0
-			for _, function := range program.Functions {
-				instructionCount += len(function.Instructions)
-			}
-
-			result["programInfo"] = map[string]interface{}{
-				"functionCount":    len(program.Functions),
-				"instructionCount": instructionCount,
-				"globalVarCount":   len(program.GlobalVars),
-				"stringTableSize":  len(program.StringTable),
-			}
-		}
-	}
-
-	json.NewEncoder(w).Encode(result)
-}
-
-// =============== UTILIDADES AUXILIARES ===============
-
-// Función auxiliar para obtener resumen de errores
-func getErrorSummary(errors []repl.Error) map[string]int {
-	summary := make(map[string]int)
-	for _, err := range errors {
-		summary[err.Type]++
-	}
-	return summary
-}
-
-// Estructura de resultado original (sin cambios)
-type executionResult struct {
-	Success         bool                  `json:"success"`
-	Errors          []repl.Error          `json:"errors"`
-	Output          string                `json:"output"`
-	FormattedOutput string                `json:"formattedOutput"`
-	ConsoleMessages []repl.ConsoleMessage `json:"consoleMessages"`
-	CSTSvg          string                `json:"cstSvg"`
-	AST             string                `json:"ast"`
-	Symbols         []repl.ReportSymbol   `json:"symbols"`
-	ScopeTrace      repl.ReportTable      `json:"scopeTrace"`
-	ErrorSummary    map[string]int        `json:"errorSummary"`
-	ExecutionTime   int64                 `json:"executionTime"`
-}
-
-// Función auxiliar existente
+// Función auxiliar para extraer símbolos del scope report
 func extractSymbolsFromScope(scopeReport repl.ReportTable) []repl.ReportSymbol {
 	var allSymbols []repl.ReportSymbol
 
+	// Función recursiva para extraer símbolos de todos los scopes
 	var extractFromScope func(scope repl.ReportScope, scopeName string)
 	extractFromScope = func(scope repl.ReportScope, scopeName string) {
+		// Agregar variables
 		for _, symbol := range scope.Vars {
 			symbol.Scope = scopeName
 			allSymbols = append(allSymbols, symbol)
 		}
 
+		// Agregar funciones
 		for _, symbol := range scope.Funcs {
 			symbol.Scope = scopeName
 			allSymbols = append(allSymbols, symbol)
 		}
 
+		// Agregar estructuras
 		for _, symbol := range scope.Structs {
 			symbol.Scope = scopeName
 			allSymbols = append(allSymbols, symbol)
 		}
 
+		// Procesar scopes hijos recursivamente
 		for _, childScope := range scope.ChildScopes {
 			childScopeName := scopeName + "." + childScope.Name
 			extractFromScope(childScope, childScopeName)
@@ -591,7 +331,33 @@ func extractSymbolsFromScope(scopeReport repl.ReportTable) []repl.ReportSymbol {
 	return allSymbols
 }
 
-// Endpoint de health check (existente, sin cambios)
+// Función auxiliar para generar AST básico si falla el CST report
+func generateBasicAST(tree antlr.ParseTree) string {
+	if tree == nil {
+		return generateErrorAST("No se pudo generar el AST")
+	}
+
+	// Generar un SVG básico con información del árbol
+	return fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400">
+		<rect width="600" height="400" fill="#1e1e1e"/>
+		<circle cx="300" cy="100" r="40" fill="#007acc" stroke="#ffffff" stroke-width="2"/>
+		<text x="300" y="105" text-anchor="middle" fill="#ffffff" font-family="Arial" font-size="12">Program</text>
+		<text x="300" y="200" text-anchor="middle" fill="#cccccc" font-family="Arial" font-size="14">
+			AST generado exitosamente
+		</text>
+		<text x="300" y="220" text-anchor="middle" fill="#cccccc" font-family="Arial" font-size="12">
+			Texto del árbol: %s
+		</text>
+	</svg>`, tree.GetText()[:min(50, len(tree.GetText()))])
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func healthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
@@ -600,21 +366,57 @@ func healthCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// =============== FUNCIÓN PRINCIPAL ===============
+// Endpoint para obtener solo el código ARM64
+func getARM64Code(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// Leer el código fuente del request
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Error reading request body", http.StatusBadRequest)
+		return
+	}
+
+	var requestData struct {
+		Code string `json:"code"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &requestData); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Análisis léxico y sintáctico
+	lexer := interpeter.NewVLangLexer(antlr.NewInputStream(requestData.Code))
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	parser := interpeter.NewVLangGrammar(stream)
+	tree := parser.Program()
+
+	// Traducir a ARM64
+	arm64Code, arm64Errors, success := translateToARM64(tree)
+
+	// Respuesta
+	response := map[string]interface{}{
+		"success":   success,
+		"arm64Code": arm64Code,
+		"errors":    arm64Errors,
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
 
 func main() {
 	r := mux.NewRouter()
 
-	// API Routes existentes
+	// API Routes
 	api := r.PathPrefix("/api").Subrouter()
 	api.HandleFunc("/status", healthCheck).Methods("GET")
 	api.HandleFunc("/execute", executeCode).Methods("POST")
 
-	// ✨ NUEVAS RUTAS PARA IR
-	api.HandleFunc("/ir/info", getIRInfo).Methods("GET")
-	api.HandleFunc("/ir/config", configureIR).Methods("POST")
-	api.HandleFunc("/ir/demo", runIRDemo).Methods("POST")
-	api.HandleFunc("/ir/analyze", analyzeIR).Methods("POST")
+	// NUEVA RUTA PARA ARM64
+	api.HandleFunc("/arm64", getARM64Code).Methods("POST")
 
 	// CORS configuration
 	c := cors.New(cors.Options{
@@ -626,32 +428,10 @@ func main() {
 	handler := c.Handler(r)
 
 	port := ":8080"
-	fmt.Printf("🚀 Servidor VLan Cherry iniciado en http://localhost%s\n", port)
-	fmt.Printf("📋 Configuración inicial:\n")
-	fmt.Printf("   🔧 IR habilitado: %v\n", serverConfig.IREnabled)
-	fmt.Printf("   🐛 Debug mode: %v\n", serverConfig.DebugMode)
-	fmt.Printf("   ⚡ Optimizar IR: %v\n", serverConfig.OptimizeIR)
-	fmt.Printf("   📊 Mostrar stats: %v\n", serverConfig.ShowIRStats)
-	fmt.Println()
+	fmt.Printf("🚀 Servidor Go iniciado en http://localhost%s\n", port)
 	fmt.Println("📋 API endpoints disponibles:")
-	fmt.Println("  Existentes:")
-	fmt.Println("    - GET    /api/status")
-	fmt.Println("    - POST   /api/execute")
-	fmt.Println("  ✨ Nuevos (IR):")
-	fmt.Println("    - GET    /api/ir/info")
-	fmt.Println("    - POST   /api/ir/config")
-	fmt.Println("    - POST   /api/ir/demo")
-	fmt.Println("    - POST   /api/ir/analyze")
-	fmt.Println()
-
-	// Ejecutar demo inicial si está en modo debug
-	if serverConfig.DebugMode {
-		fmt.Printf("🎯 Ejecutando demo inicial del sistema IR...\n")
-		go func() {
-			time.Sleep(2 * time.Second) // Esperar a que el servidor inicie
-			examples.RunIRDemo()
-		}()
-	}
+	fmt.Println("  - GET    /api/status")
+	fmt.Println("  - POST   /api/execute")
 
 	log.Fatal(http.ListenAndServe(port, handler))
 }
