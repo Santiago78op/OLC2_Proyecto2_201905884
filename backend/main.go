@@ -15,9 +15,10 @@ import (
 	// Importa el paquete de pruebas que contiene la lógica de ejecución
 
 	"main.go/ast"
+	compiler "main.go/compiler" // NUEVA: nuestro traductor ARM64
 	"main.go/cst"
 	"main.go/errors"
-	compiler "main.go/grammar"
+	interpeter "main.go/grammar"
 	"main.go/repl"
 )
 
@@ -33,6 +34,33 @@ type executionResult struct {
 	ScopeTrace      repl.ReportTable      `json:"scopeTrace"`
 	ErrorSummary    map[string]int        `json:"errorSummary"`
 	ExecutionTime   int64                 `json:"executionTime"`
+
+	// NUEVOS CAMPOS PARA ARM64
+	ARM64Code   string   `json:"arm64Code"`   // Código ARM64 generado
+	ARM64Errors []string `json:"arm64Errors"` // Errores de traducción
+	HasARM64    bool     `json:"hasArm64"`    // Si se generó código ARM64
+}
+
+// función para traducir a ARM64
+func translateToARM64(tree antlr.ParseTree) (string, []string, bool) {
+	fmt.Printf("🔹 Iniciando traducción a ARM64...\n")
+
+	// Crear el traductor
+	translator := compiler.NewARM64Translator()
+
+	// Traducir el programa
+	arm64Code, errors := translator.TranslateProgram(tree)
+
+	if len(errors) > 0 {
+		fmt.Printf("❌ Errores en traducción ARM64: %d\n", len(errors))
+		for _, err := range errors {
+			fmt.Printf("   - %s\n", err)
+		}
+	} else {
+		fmt.Printf("✅ Traducción ARM64 exitosa\n")
+	}
+
+	return arm64Code, errors, len(errors) == 0
 }
 
 func executeCode(w http.ResponseWriter, r *http.Request) {
@@ -94,13 +122,13 @@ func executeCode(w http.ResponseWriter, r *http.Request) {
 
 	// 2. Análisis Léxico
 	lexicalErrorListener := errors.NewLexicalErrorListener()
-	lexer := compiler.NewVLangLexer(antlr.NewInputStream(codeString))
+	lexer := interpeter.NewVLangLexer(antlr.NewInputStream(codeString))
 	lexer.RemoveErrorListeners()
 	lexer.AddErrorListener(lexicalErrorListener)
 
 	// 3. Análisis Sintáctico
 	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
-	parser := compiler.NewVLangGrammar(stream)
+	parser := interpeter.NewVLangGrammar(stream)
 	parser.BuildParseTrees = true
 
 	syntaxErrorListener := errors.NewSyntaxErrorListener(lexicalErrorListener.ErrorTable)
@@ -209,6 +237,21 @@ func executeCode(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("🔹 Tiempo total: %v\n", reportEndTime.Sub(startTime))
 	fmt.Printf("🔹 Salida: %s\n", output)
 
+	var arm64Code string
+	var arm64Errors []string
+	var hasValidARM64 bool
+
+	// Solo intentar traducir a ARM64 si no hay errores de compilación
+	if !hasCompilationErrors {
+		fmt.Printf("🔹 Intentando generar código ARM64...\n")
+		arm64Code, arm64Errors, hasValidARM64 = translateToARM64(tree)
+		fmt.Print("Codigo Arm64 \n", arm64Code)
+	} else {
+		arm64Code = ""
+		arm64Errors = []string{"No se puede generar ARM64 debido a errores de compilación"}
+		hasValidARM64 = false
+	}
+
 	// Crear resultado con información detallada
 	result := executionResult{
 		Success:         success,
@@ -222,6 +265,11 @@ func executeCode(w http.ResponseWriter, r *http.Request) {
 		ScopeTrace:      scopeReport,
 		ErrorSummary:    errorSummary,
 		ExecutionTime:   interpretationEndTime.Sub(startTime).Milliseconds(),
+
+		// NUEVOS CAMPOS ARM64
+		ARM64Code:   arm64Code,
+		ARM64Errors: arm64Errors,
+		HasARM64:    hasValidARM64,
 	}
 
 	// Enviar respuesta
@@ -319,6 +367,47 @@ func healthCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Endpoint para obtener solo el código ARM64
+func getARM64Code(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// Leer el código fuente del request
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Error reading request body", http.StatusBadRequest)
+		return
+	}
+
+	var requestData struct {
+		Code string `json:"code"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &requestData); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Análisis léxico y sintáctico
+	lexer := interpeter.NewVLangLexer(antlr.NewInputStream(requestData.Code))
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	parser := interpeter.NewVLangGrammar(stream)
+	tree := parser.Program()
+
+	// Traducir a ARM64
+	arm64Code, arm64Errors, success := translateToARM64(tree)
+
+	// Respuesta
+	response := map[string]interface{}{
+		"success":   success,
+		"arm64Code": arm64Code,
+		"errors":    arm64Errors,
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
 func main() {
 	r := mux.NewRouter()
 
@@ -326,6 +415,9 @@ func main() {
 	api := r.PathPrefix("/api").Subrouter()
 	api.HandleFunc("/status", healthCheck).Methods("GET")
 	api.HandleFunc("/execute", executeCode).Methods("POST")
+
+	// NUEVA RUTA PARA ARM64
+	api.HandleFunc("/arm64", getARM64Code).Methods("POST")
 
 	// CORS configuration
 	c := cors.New(cors.Options{
