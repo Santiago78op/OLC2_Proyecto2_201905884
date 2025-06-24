@@ -210,6 +210,9 @@ func (t *ARM64Translator) analyzeVariables(node antlr.ParseTree) {
 			t.addError(fmt.Sprintf("Variable '%s' ya está declarada", varName))
 		}
 
+	case *compiler.VarVectDeclContext:
+		// Logica de Vectores
+
 	case *compiler.VarAssDeclContext:
 		varName := ctx.ID().GetText()
 		if !t.generator.VariableExists(varName) {
