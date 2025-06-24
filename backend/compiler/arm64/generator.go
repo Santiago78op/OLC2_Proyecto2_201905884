@@ -29,9 +29,9 @@ func NewARM64Generator() *ARM64Generator {
 	}
 }
 
-// Método para agregar strings a la sección .data - CORREGIDO
+// Método para agregar strings a la sección .data
 func (g *ARM64Generator) AddStringLiteral(text string) string {
-	// Verificar si el string ya existe
+	// NUEVO: Verificar si el string ya existe
 	if existingLabel, exists := g.stringMap[text]; exists {
 		fmt.Printf("🔄 String \"%s\" ya existe como %s, reutilizando\n", text, existingLabel)
 		return existingLabel
@@ -44,29 +44,12 @@ func (g *ARM64Generator) AddStringLiteral(text string) string {
 	// Agregar al mapa para evitar duplicados futuros
 	g.stringMap[text] = stringLabel
 
-	// CORREGIDO: Escapar correctamente para el ensamblador ARM64
-	escapedText := g.escapeStringForAssembly(text)
-
 	// Agregar definición del string a la lista
-	stringDef := fmt.Sprintf("%s: .asciz \"%s\"", stringLabel, escapedText)
+	stringDef := fmt.Sprintf("%s: .asciz \"%s\"", stringLabel, text)
 	g.stringData = append(g.stringData, stringDef)
 
 	fmt.Printf("✅ Nuevo string \"%s\" creado como %s\n", text, stringLabel)
 	return stringLabel
-}
-
-// NUEVO: Escapar strings correctamente para el ensamblador
-func (g *ARM64Generator) escapeStringForAssembly(input string) string {
-	result := input
-
-	// Escapar caracteres especiales para el ensamblador
-	result = strings.ReplaceAll(result, "\\", "\\\\") // Escapar backslashes primero
-	result = strings.ReplaceAll(result, "\"", "\\\"") // Escapar comillas dobles
-	result = strings.ReplaceAll(result, "\n", "\\n")  // Escapar saltos de línea
-	result = strings.ReplaceAll(result, "\t", "\\t")  // Escapar tabs
-	result = strings.ReplaceAll(result, "\r", "\\r")  // Escapar carriage return
-
-	return result
 }
 
 // === GESTIÓN DE INSTRUCCIONES ===
@@ -81,29 +64,9 @@ func (g *ARM64Generator) EmitRaw(instruction string) {
 	g.instructions = append(g.instructions, instruction)
 }
 
-// Comment añade un comentario explicativo - CORREGIDO
+// Comment añade un comentario explicativo
 func (g *ARM64Generator) Comment(comment string) {
-	// CORREGIDO: Limpiar comentarios para evitar conflictos con el ensamblador
-	cleanComment := g.cleanCommentForAssembly(comment)
-	g.instructions = append(g.instructions, "    // "+cleanComment)
-}
-
-// NUEVO: Limpiar comentarios para el ensamblador
-func (g *ARM64Generator) cleanCommentForAssembly(comment string) string {
-	result := comment
-
-	// Reemplazar caracteres problemáticos en comentarios
-	result = strings.ReplaceAll(result, "\"", "'")     // Reemplazar comillas dobles con simples
-	result = strings.ReplaceAll(result, "\n", " ")     // Reemplazar saltos de línea con espacios
-	result = strings.ReplaceAll(result, "\t", " ")     // Reemplazar tabs con espacios
-	result = strings.ReplaceAll(result, "$", "DOLLAR") // Reemplazar $ que puede confundir
-
-	// Limitar longitud del comentario
-	if len(result) > 80 {
-		result = result[:77] + "..."
-	}
-
-	return result
+	g.instructions = append(g.instructions, "    // "+comment)
 }
 
 // === GESTIÓN DE ETIQUETAS ===
@@ -127,12 +90,6 @@ func (g *ARM64Generator) DeclareVariable(name string) {
 	g.stackOffset += 8 // Cada variable ocupa 8 bytes en ARM64
 	g.variables[name] = g.stackOffset
 	g.Comment(fmt.Sprintf("Variable '%s' declarada en offset %d", name, g.stackOffset))
-}
-
-// NUEVO: DeclareVariableAtOffset declara una variable en un offset específico
-func (g *ARM64Generator) DeclareVariableAtOffset(name string, offset int) {
-	g.variables[name] = offset
-	g.Comment(fmt.Sprintf("Variable '%s' declarada en offset %d", name, offset))
 }
 
 // GetVariableOffset obtiene el offset de una variable
@@ -249,11 +206,11 @@ func (g *ARM64Generator) CallFunction(funcName string) {
 
 // === GENERACIÓN DE PROGRAMA COMPLETO ===
 
-// GenerateHeader genera el header del programa ARM64 - CORREGIDO
+// GenerateHeader genera el header del programa ARM64
 func (g *ARM64Generator) GenerateHeader() {
 	g.EmitRaw(".data")
 
-	// CORREGIDO: Agregar todos los strings a la sección .data
+	// NUEVO: Agregar todos los strings a la sección .data
 	for _, stringDef := range g.stringData {
 		g.EmitRaw(stringDef)
 	}
@@ -303,57 +260,10 @@ func (g *ARM64Generator) Reset() {
 	g.stackOffset = 0
 	g.stringData = make([]string, 0)
 	g.stringCount = 0
-	g.stringMap = make(map[string]string)
+	g.stringMap = make(map[string]string) // NUEVO
 }
 
 // === UTILIDADES DE DEBUG ===
-// ResetVariableOffsets reinicia los offsets de variables (útil para funciones)
-func (g *ARM64Generator) ResetVariableOffsets() {
-	g.stackOffset = 0
-	// No limpiar el mapa de variables, solo el offset global
-}
-
-// GetVariableCount retorna el número de variables declaradas
-func (g *ARM64Generator) GetVariableCount() int {
-	return len(g.variables)
-}
-
-// PrintStackInfo imprime información del stack para debugging
-func (g *ARM64Generator) PrintStackInfo() {
-	g.Comment("=== INFORMACIÓN DEL STACK ===")
-	for name, offset := range g.variables {
-		g.Comment(fmt.Sprintf("Variable '%s' en offset %d", name, offset))
-	}
-	g.Comment(fmt.Sprintf("Stack offset actual: %d", g.stackOffset))
-	g.Comment("=== FIN INFORMACIÓN DEL STACK ===")
-}
-
-// SaveRegistersForCall guarda registros antes de una llamada a función
-func (g *ARM64Generator) SaveRegistersForCall() {
-	g.Comment("Guardar registros antes de llamada a función")
-	g.Emit("stp x19, x20, [sp, #-16]!")
-	g.Emit("stp x21, x22, [sp, #-16]!")
-	g.Emit("stp x23, x24, [sp, #-16]!")
-}
-
-// RestoreRegistersAfterCall restaura registros después de una llamada a función
-func (g *ARM64Generator) RestoreRegistersAfterCall() {
-	g.Comment("Restaurar registros después de llamada a función")
-	g.Emit("ldp x23, x24, [sp], #16")
-	g.Emit("ldp x21, x22, [sp], #16")
-	g.Emit("ldp x19, x20, [sp], #16")
-}
-
-// LoadStringVariable carga una variable string para interpolación
-func (g *ARM64Generator) LoadStringVariable(varName string) {
-	if g.VariableExists(varName) {
-		g.Comment(fmt.Sprintf("Cargar variable string '%s' para interpolación", varName))
-		g.LoadVariable("x0", varName)
-	} else {
-		g.Comment(fmt.Sprintf("Variable string '%s' no encontrada", varName))
-		g.LoadImmediate("x0", 0)
-	}
-}
 
 // PrintVariables muestra las variables declaradas (para debug)
 func (g *ARM64Generator) PrintVariables() {
