@@ -1,3 +1,4 @@
+// backend/compiler/translator.go
 package compiler
 
 import (
@@ -43,11 +44,15 @@ func (t *ARM64Translator) TranslateProgram(tree antlr.ParseTree) (string, []stri
 	t.generator.Reset()
 	t.errors = make([]string, 0)
 
-	// Primera pasada: analizar declaraciones de variables
-	t.analyzeVariables(tree)
+	fmt.Printf("🔍 === PRIMERA PASADA: ANÁLISIS DEL PROGRAMA ===\n")
+
+	// Primera pasada: analizar declaraciones de variables Y strings
+	t.analyzeVariablesAndStrings(tree)
 
 	// Generar header del programa
 	t.generator.GenerateHeader()
+
+	fmt.Printf("🔍 === SEGUNDA PASADA: GENERACIÓN DE CÓDIGO ===\n")
 
 	// Traducir el contenido del programa / Segunda pasada
 	t.translateNode(tree)
@@ -65,6 +70,255 @@ func (t *ARM64Translator) TranslateProgram(tree antlr.ParseTree) (string, []stri
 
 	return t.generator.GetCode(), t.errors
 }
+
+// === ANÁLISIS MEJORADO (PRIMERA PASADA) ===
+
+// analyzeVariablesAndStrings hace una pasada previa para encontrar todas las variables Y strings
+func (t *ARM64Translator) analyzeVariablesAndStrings(node antlr.ParseTree) {
+	switch ctx := node.(type) {
+	case *compiler.ProgramContext:
+		for _, stmt := range ctx.AllStmt() {
+			fmt.Printf("🔍 Analizando statement: %T\n", stmt)
+			t.analyzeVariablesAndStrings(stmt)
+		}
+
+	case *compiler.StmtContext:
+		if ctx.Decl_stmt() != nil {
+			t.analyzeVariablesAndStrings(ctx.Decl_stmt())
+		}
+		if ctx.If_stmt() != nil {
+			t.analyzeVariablesAndStrings(ctx.If_stmt())
+		}
+		if ctx.Switch_stmt() != nil {
+			t.analyzeVariablesAndStrings(ctx.Switch_stmt())
+		}
+		if ctx.For_stmt() != nil {
+			t.analyzeVariablesAndStrings(ctx.For_stmt())
+		}
+		if ctx.Func_dcl() != nil {
+			t.analyzeVariablesAndStrings(ctx.Func_dcl())
+		}
+		if ctx.Transfer_stmt() != nil {
+			t.analyzeVariablesAndStrings(ctx.Transfer_stmt())
+		}
+		if ctx.Func_call() != nil {
+			t.analyzeVariablesAndStrings(ctx.Func_call())
+		}
+
+	case *compiler.ValueDeclContext:
+		varName := ctx.ID().GetText()
+		if !t.generator.VariableExists(varName) {
+			t.generator.DeclareVariable(varName)
+		}
+		// Analizar strings en la expresión de inicialización
+		if ctx.Expression() != nil {
+			t.analyzeStringsInExpression(ctx.Expression())
+		}
+
+	case *compiler.MutVarDeclContext:
+		varName := ctx.ID().GetText()
+		if !t.generator.VariableExists(varName) {
+			t.generator.DeclareVariable(varName)
+		}
+		// Analizar strings en la expresión de inicialización
+		if ctx.Expression() != nil {
+			t.analyzeStringsInExpression(ctx.Expression())
+		}
+
+	case *compiler.VarAssDeclContext:
+		varName := ctx.ID().GetText()
+		if !t.generator.VariableExists(varName) {
+			t.generator.DeclareVariable(varName)
+		}
+		// Analizar strings en la expresión de inicialización
+		if ctx.Expression() != nil {
+			t.analyzeStringsInExpression(ctx.Expression())
+		}
+
+	case *compiler.FuncDeclContext:
+		funcName := ctx.ID().GetText()
+
+		fmt.Printf("🔍 Analizando función: %s\n", funcName)
+
+		// Registrar función de usuario
+		if funcName != "main" {
+			t.userFunctions[funcName] = ctx
+		}
+
+		// Contar parámetros
+		paramCount := 0
+		if ctx.Param_list() != nil {
+			params := ctx.Param_list().(*compiler.ParamListContext).AllFunc_param()
+			paramCount = len(params)
+			for i, param := range params {
+				if paramCtx := param.(*compiler.FuncParamContext); paramCtx.ID() != nil {
+					paramName := paramCtx.ID().GetText()
+					fmt.Printf("📝 Parámetro: %s\n", paramName)
+					t.generator.DeclareVariable(paramName)
+				} else {
+					fmt.Printf("📝 Parámetro %d: sin nombre\n", i)
+				}
+			}
+		}
+
+		// Analizar el cuerpo de la función
+		varCount := 0
+		for _, stmt := range ctx.AllStmt() {
+			initialVarCount := len(t.generator.GetVariables())
+			t.analyzeVariablesAndStrings(stmt)
+			varCount += len(t.generator.GetVariables()) - initialVarCount
+		}
+
+		stackSize := (paramCount + varCount) * 8
+		fmt.Printf("📊 Parámetros: %d, Variables locales: %d, Stack: %d bytes\n", paramCount, varCount, stackSize)
+
+	// NUEVO: Análisis específico de llamadas a funciones
+	case *compiler.FuncCallContext:
+		fmt.Printf("🔍 Analizando llamada a función: %s\n", ctx.Id_pattern().GetText())
+
+		// Analizar argumentos en busca de strings
+		if ctx.Arg_list() != nil {
+			args := ctx.Arg_list().(*compiler.ArgListContext).AllFunc_arg()
+			for i, arg := range args {
+				fmt.Printf("🔍   Analizando argumento %d: %s\n", i, arg.GetText())
+				if argCtx := arg.(*compiler.FuncArgContext); argCtx != nil {
+					if argCtx.Expression() != nil {
+						t.analyzeStringsInExpression(argCtx.Expression())
+					}
+				}
+			}
+		}
+
+	// Otros casos que pueden contener strings
+	case *compiler.IfStmtContext:
+		for _, ifChain := range ctx.AllIf_chain() {
+			if ifChainCtx, ok := ifChain.(*compiler.IfChainContext); ok {
+				// Analizar condición
+				if ifChainCtx.Expression() != nil {
+					t.analyzeStringsInExpression(ifChainCtx.Expression())
+				}
+				// Analizar cuerpo
+				for _, stmt := range ifChainCtx.AllStmt() {
+					t.analyzeVariablesAndStrings(stmt)
+				}
+			}
+		}
+		if ctx.Else_stmt() != nil {
+			elseCtx := ctx.Else_stmt().(*compiler.ElseStmtContext)
+			for _, stmt := range elseCtx.AllStmt() {
+				t.analyzeVariablesAndStrings(stmt)
+			}
+		}
+
+	case *compiler.ForStmtCondContext:
+		// Analizar condición
+		if ctx.Expression() != nil {
+			t.analyzeStringsInExpression(ctx.Expression())
+		}
+		// Analizar cuerpo
+		for _, stmt := range ctx.AllStmt() {
+			t.analyzeVariablesAndStrings(stmt)
+		}
+	}
+}
+
+// === ANÁLISIS MEJORADO DE STRINGS ===
+
+// analyzeStringsInExpression busca strings en expresiones de forma más completa
+func (t *ARM64Translator) analyzeStringsInExpression(expr antlr.ParseTree) {
+	if expr == nil {
+		return
+	}
+
+	fmt.Printf("🔍 Analizando expresión para strings: %s (tipo: %T)\n", expr.GetText(), expr)
+
+	switch ctx := expr.(type) {
+	case *compiler.StringLiteralContext:
+		// STRING LITERAL DIRECTO
+		t.preProcessStringLiteral(ctx)
+
+	case *compiler.LiteralExprContext:
+		// Expresión literal que puede contener un string
+		t.analyzeStringsInExpression(ctx.Literal())
+
+	case *compiler.LiteralContext:
+		// Buscar string literals en el literal
+		for i := 0; i < ctx.GetChildCount(); i++ {
+			child := ctx.GetChild(i)
+			if stringCtx, ok := child.(*compiler.StringLiteralContext); ok {
+				t.preProcessStringLiteral(stringCtx)
+			}
+		}
+
+	case *compiler.BinaryExprContext:
+		// Analizar ambos lados de la expresión binaria
+		t.analyzeStringsInExpression(ctx.GetLeft())
+		t.analyzeStringsInExpression(ctx.GetRight())
+
+	case *compiler.ParensExprContext:
+		// Analizar expresión entre paréntesis
+		t.analyzeStringsInExpression(ctx.Expression())
+
+	case *compiler.FuncCallExprContext:
+		// Analizar llamada a función
+		t.analyzeStringsInExpression(ctx.Func_call())
+
+	case *compiler.FuncCallContext:
+		// Analizar argumentos de la función
+		if ctx.Arg_list() != nil {
+			args := ctx.Arg_list().(*compiler.ArgListContext).AllFunc_arg()
+			for _, arg := range args {
+				if argCtx := arg.(*compiler.FuncArgContext); argCtx != nil {
+					if argCtx.Expression() != nil {
+						t.analyzeStringsInExpression(argCtx.Expression())
+					}
+				}
+			}
+		}
+
+	default:
+		// Para otros tipos, analizar recursivamente todos los hijos
+		if ctx, ok := expr.(antlr.ParserRuleContext); ok {
+			for i := 0; i < ctx.GetChildCount(); i++ {
+				if child := ctx.GetChild(i); child != nil {
+					if parseTreeChild, ok := child.(antlr.ParseTree); ok {
+						t.analyzeStringsInExpression(parseTreeChild)
+					}
+				}
+			}
+		}
+	}
+}
+
+// preProcessStringLiteral procesa strings en la primera pasada (MEJORADO)
+func (t *ARM64Translator) preProcessStringLiteral(ctx *compiler.StringLiteralContext) {
+	text := ctx.GetText()
+	if len(text) >= 2 {
+		text = text[1 : len(text)-1] // Quitar comillas
+	}
+
+	// Procesar secuencias de escape
+	text = strings.ReplaceAll(text, "\\n", "\n")
+	text = strings.ReplaceAll(text, "\\t", "\t")
+	text = strings.ReplaceAll(text, "\\\"", "\"")
+	text = strings.ReplaceAll(text, "\\\\", "\\")
+
+	// Verificar si ya fue procesado
+	if existingLabel, exists := t.stringRegistry[text]; exists {
+		fmt.Printf("🔄 String \"%s\" ya procesado como %s\n", text, existingLabel)
+		return
+	}
+
+	// Agregar al generador
+	stringLabel := t.generator.AddStringLiteral(text)
+
+	// Registrar para evitar duplicados
+	t.stringRegistry[text] = stringLabel
+
+	fmt.Printf("✅ STRING REGISTRADO: \"%s\" -> %s\n", text, stringLabel)
+}
+
+// === RESTO DE MÉTODOS (mantenidos igual) ===
 
 func (t *ARM64Translator) generateUserFunctions() {
 	t.generator.EmitRaw("")
@@ -158,149 +412,7 @@ func (t *ARM64Translator) translateReturnStatement(ctx *compiler.ReturnStmtConte
 	t.generator.Emit("ret")
 }
 
-// === ANÁLISIS PREVIO ===
-
-// analyzeVariables hace una pasada previa para encontrar todas las variables
-// Esto nos permite reservar espacio en el stack antes de generar código
-func (t *ARM64Translator) analyzeVariables(node antlr.ParseTree) {
-
-	switch ctx := node.(type) {
-	case *compiler.ProgramContext:
-		for _, stmt := range ctx.AllStmt() {
-			fmt.Printf("Analizando declaración: %T\n", stmt)
-			t.analyzeVariables(stmt)
-		}
-
-	case *compiler.StmtContext:
-		if ctx.Decl_stmt() != nil {
-			fmt.Printf("Analizando declaración de variable: %T\n", ctx.Decl_stmt())
-			t.analyzeVariables(ctx.Decl_stmt())
-		}
-		if ctx.If_stmt() != nil {
-			t.analyzeVariables(ctx.If_stmt())
-		}
-
-		// Ingreso de Switch
-		if ctx.Switch_stmt() != nil {
-			t.analyzeVariables(ctx.Switch_stmt())
-		}
-
-		if ctx.For_stmt() != nil {
-			t.analyzeVariables(ctx.For_stmt())
-		}
-		if ctx.Func_dcl() != nil {
-			fmt.Printf("Analizando función: %T\n", ctx.Func_dcl())
-			t.analyzeVariables(ctx.Func_dcl())
-		}
-		if ctx.Transfer_stmt() != nil { // AGREGAR ESTO
-			t.analyzeVariables(ctx.Transfer_stmt())
-		}
-
-	case *compiler.ValueDeclContext:
-		// Declaración de variable simple
-		varName := ctx.ID().GetText()
-		if !t.generator.VariableExists(varName) {
-			t.generator.DeclareVariable(varName)
-		} else {
-			t.addError(fmt.Sprintf("Variable '%s' ya está declarada", varName))
-		}
-	case *compiler.MutVarDeclContext:
-		varName := ctx.ID().GetText()
-		if !t.generator.VariableExists(varName) {
-			t.generator.DeclareVariable(varName)
-		} else {
-			t.addError(fmt.Sprintf("Variable '%s' ya está declarada", varName))
-		}
-
-	case *compiler.VarVectDeclContext:
-		// Logica de Vectores
-
-	case *compiler.VarAssDeclContext:
-		varName := ctx.ID().GetText()
-		if !t.generator.VariableExists(varName) {
-			t.generator.DeclareVariable(varName)
-		} else {
-			t.addError(fmt.Sprintf("Variable '%s' ya está declarada", varName))
-		}
-
-	case *compiler.IfStmtContext:
-		// Analizar el cuerpo del if
-		for _, ifChain := range ctx.AllIf_chain() {
-			if ifChainCtx, ok := ifChain.(*compiler.IfChainContext); ok {
-				for _, stmt := range ifChainCtx.AllStmt() {
-					t.analyzeVariables(stmt)
-				}
-			}
-		}
-		// Analizar el else si existe
-		if ctx.Else_stmt() != nil {
-			elseCtx := ctx.Else_stmt().(*compiler.ElseStmtContext)
-			for _, stmt := range elseCtx.AllStmt() {
-				t.analyzeVariables(stmt)
-			}
-		}
-
-	case *compiler.SwitchStmtContext:
-		fmt.Println("Analizando Switch Statement", ctx)
-
-		// Analizar cada case
-		cases := ctx.AllSwitch_case()
-		fmt.Printf("Número de cases: %d\n", len(cases))
-
-		// Ciclo for para analizar cada case
-		for i, switchCase := range cases {
-			if caseCtx, ok := switchCase.(*compiler.SwitchCaseContext); ok {
-				fmt.Printf("Analizando case %d: %s\n", i, caseCtx.GetText())
-
-				// NUEVO: Analizar strings en las expresiones del case
-				t.analyzeStringsInExpression(caseCtx.Expression())
-
-				// Analizar todas las declaraciones dentro del case
-				statements := caseCtx.AllStmt()
-				fmt.Printf("Número de statements en case %d: %d\n", i, len(statements))
-
-				for j, stmt := range statements {
-					fmt.Printf("Analizando statement %d en case %d: %T\n", j, i, stmt)
-					t.analyzeVariables(stmt)
-					// NUEVO: Analizar strings en statements
-					t.analyzeStringsInStatement(stmt)
-				}
-			}
-		}
-
-		// Analizar el caso default si existe
-		if ctx.Default_case() != nil {
-			defaultCtx := ctx.Default_case().(*compiler.DefaultCaseContext)
-			fmt.Println("Analizando default case")
-			for _, stmt := range defaultCtx.AllStmt() {
-				t.analyzeVariables(stmt)
-				// NUEVO: Analizar strings en default case
-				t.analyzeStringsInStatement(stmt)
-			}
-		}
-
-	case *compiler.ForStmtCondContext:
-		// Analizar el cuerpo del for
-		for _, stmt := range ctx.AllStmt() {
-			t.analyzeVariables(stmt)
-		}
-
-	case *compiler.FuncDeclContext:
-		funcName := ctx.ID().GetText()
-		// AGREGAR: Registrar función de usuario
-		if funcName != "main" {
-			t.userFunctions[funcName] = ctx
-			fmt.Printf("Registrando función de usuario: %s\n", funcName)
-		}
-
-		// Analizar el cuerpo de la función
-		for _, stmt := range ctx.AllStmt() {
-			t.analyzeVariables(stmt)
-		}
-	}
-}
-
-// === TRADUCCIÓN DE NODOS ===
+// === TRADUCCIÓN DE NODOS (mantenida igual) ===
 
 // translateNode traduce cualquier nodo del AST
 func (t *ARM64Translator) translateNode(node antlr.ParseTree) {
@@ -340,9 +452,7 @@ func (t *ARM64Translator) translateNode(node antlr.ParseTree) {
 }
 
 // Manejar transfer statements (return, break, continue)
-// Manejar transfer statements (return, break, continue)
 func (t *ARM64Translator) translateTransferStatement(ctx *compiler.Transfer_stmtContext) {
-
 	// Analizar por el texto del primer token para determinar el tipo
 	text := ctx.GetText()
 
@@ -404,16 +514,6 @@ func (t *ARM64Translator) translateContinueStatementFromTransfer(ctx *compiler.T
 	// TODO: Implementar continue
 }
 
-func (t *ARM64Translator) translateBreakStatement(ctx *compiler.BreakStmtContext) {
-	// TODO: Implementar break (necesita manejo de labels de loops)
-	t.generator.Comment("=== BREAK STATEMENT ===")
-}
-
-func (t *ARM64Translator) translateContinueStatement(ctx *compiler.ContinueStmtContext) {
-	// TODO: Implementar continue (necesita manejo de labels de loops)
-	t.generator.Comment("=== CONTINUE STATEMENT ===")
-}
-
 // translateProgram traduce el nodo programa principal
 func (t *ARM64Translator) translateProgram(ctx *compiler.ProgramContext) {
 	t.generator.Comment("=== TRADUCCIÓN DEL PROGRAMA PRINCIPAL ===")
@@ -439,12 +539,13 @@ func (t *ARM64Translator) translateStatement(ctx *compiler.StmtContext) {
 		t.translateNode(ctx.Func_call())
 	} else if ctx.Func_dcl() != nil {
 		t.translateNode(ctx.Func_dcl())
-	} else if ctx.Transfer_stmt() != nil { // AGREGAR ESTO
+	} else if ctx.Transfer_stmt() != nil {
 		t.translateNode(ctx.Transfer_stmt())
 	}
 }
 
 // === DECLARACIONES DE VARIABLES ===
+
 // Manejar declaraciones de funciones
 func (t *ARM64Translator) translateFunctionDeclaration(ctx *compiler.FuncDeclContext) {
 	funcName := ctx.ID().GetText()
@@ -596,7 +697,7 @@ func (t *ARM64Translator) translateLiteral(ctx *compiler.LiteralContext) {
 	}
 }
 
-// ✅ AGREGAR ESTAS FUNCIONES SI NO EXISTEN:
+// ✅ FUNCIONES DE TRADUCCIÓN DE LITERALES:
 func (t *ARM64Translator) translateFloatLiteral(ctx *compiler.FloatLiteralContext) {
 	valueStr := ctx.GetText()
 	value, err := strconv.ParseFloat(valueStr, 64)
@@ -620,10 +721,10 @@ func (t *ARM64Translator) translateStringLiteral(ctx *compiler.StringLiteralCont
 	text = strings.ReplaceAll(text, "\\\"", "\"")
 	text = strings.ReplaceAll(text, "\\\\", "\\")
 
-	// NUEVO: Verificar si ya fue procesado en la primera pasada
+	// VERIFICAR si ya fue procesado en la primera pasada
 	if existingLabel, exists := t.stringRegistry[text]; exists {
 		// Ya existe, usar la etiqueta existente
-		t.generator.Comment(fmt.Sprintf("Reutilizar string \"%s\" con etiqueta %s", text, existingLabel))
+		t.generator.Comment(fmt.Sprintf("Usar string \"%s\" con etiqueta %s", text, existingLabel))
 		t.generator.Emit(fmt.Sprintf("adr x0, %s", existingLabel))
 		return
 	}
@@ -714,181 +815,6 @@ func (t *ARM64Translator) translateComparison(reg1, reg2, condition string) {
 	// Usar CSET para convertir el resultado de la comparación a 1 o 0
 	t.generator.Comment(fmt.Sprintf("Convertir resultado de comparación a 1/0"))
 	t.generator.Emit(fmt.Sprintf("cset %s, %s", arm64.X0, condition))
-}
-
-// === CONTROL DE FLUJO ===
-
-// translateIfStatement traduce declaraciones if-else
-func (t *ARM64Translator) translateIfStatement(ctx *compiler.IfStmtContext) {
-	t.generator.Comment("=== IF STATEMENT ===")
-
-	elseLabel := t.generator.GetLabel()
-	endLabel := t.generator.GetLabel()
-
-	// Evaluar la condición del primer if_chain
-	if len(ctx.AllIf_chain()) > 0 {
-		ifChain := ctx.AllIf_chain()[0]
-		if ifChainCtx, ok := ifChain.(*compiler.IfChainContext); ok {
-			// Evaluar condición
-			t.translateExpression(ifChainCtx.Expression())
-
-			// Saltar a else si la condición es falsa (0)
-			t.generator.JumpIfZero(arm64.X0, elseLabel)
-
-			// Ejecutar cuerpo del if
-			for _, stmt := range ifChainCtx.AllStmt() {
-				t.translateNode(stmt)
-			}
-
-			// Saltar al final para evitar ejecutar el else
-			t.generator.Jump(endLabel)
-		}
-	}
-
-	// Etiqueta else
-	t.generator.SetLabel(elseLabel)
-
-	// Si hay else, ejecutarlo
-	if ctx.Else_stmt() != nil {
-		elseCtx := ctx.Else_stmt().(*compiler.ElseStmtContext)
-		for _, stmt := range elseCtx.AllStmt() {
-			t.translateNode(stmt)
-		}
-	}
-
-	// Etiqueta final
-	t.generator.SetLabel(endLabel)
-}
-
-// translateSwitchStatement traduce declaraciones switch - VERSIÓN CORREGIDA
-func (t *ARM64Translator) translateSwitchStatement(ctx *compiler.SwitchStmtContext) {
-	t.generator.Comment("=== SWITCH STATEMENT ===")
-
-	// Debug: Mostrar el valor del switch
-	fmt.Printf("🔍 Switch expression: %s\n", ctx.Expression().GetText())
-
-	// Evaluar la expresión del switch una vez y guardarla
-	t.translateExpression(ctx.Expression())
-	t.generator.Comment("Guardar valor del switch en x19")
-	t.generator.Emit("mov x19, x0")
-
-	// Generar etiquetas
-	defaultLabel := t.generator.GetLabel()
-	endLabel := t.generator.GetLabel()
-	caseLabels := make([]string, 0)
-
-	// Push etiquetas de break
-	t.breakLabels = append(t.breakLabels, endLabel)
-
-	// Generar etiquetas para cada caso
-	cases := ctx.AllSwitch_case()
-	for range cases {
-		caseLabels = append(caseLabels, t.generator.GetLabel())
-	}
-
-	t.generator.Comment("=== COMPARACIONES DE CASOS ===")
-
-	// Generar comparaciones para cada caso
-	for i, switchCase := range cases {
-		if caseCtx, ok := switchCase.(*compiler.SwitchCaseContext); ok {
-			t.generator.Comment(fmt.Sprintf("Comparar caso %d", i))
-
-			// DEBUG: Mostrar valor del caso
-			fmt.Printf("🔍 Case %d expression: %s\n", i, caseCtx.Expression().GetText())
-
-			// Evaluar la expresión del caso
-			t.translateExpression(caseCtx.Expression())
-
-			// Comparar con el valor del switch
-			t.generator.Compare("x19", "x0")
-			t.generator.Emit(fmt.Sprintf("beq %s", caseLabels[i]))
-		}
-	}
-
-	// Si ningún caso coincide, ir al default (o al final si no hay default)
-	if ctx.Default_case() != nil {
-		t.generator.Jump(defaultLabel)
-	} else {
-		t.generator.Jump(endLabel)
-	}
-
-	// Generar código para cada caso
-	for i, switchCase := range cases {
-		if caseCtx, ok := switchCase.(*compiler.SwitchCaseContext); ok {
-			t.generator.SetLabel(caseLabels[i])
-			t.generator.Comment(fmt.Sprintf("=== CASO %d ===", i))
-
-			// DEBUG: Mostrar statements del caso
-			fmt.Printf("🔍 Case %d statements: %d\n", i, len(caseCtx.AllStmt()))
-			for j, stmt := range caseCtx.AllStmt() {
-				fmt.Printf("🔍   Statement %d: %s\n", j, stmt.GetText())
-			}
-
-			// Ejecutar statements del caso
-			for _, stmt := range caseCtx.AllStmt() {
-				t.translateNode(stmt)
-			}
-
-			// Automáticamente saltar al final (break implícito)
-			t.generator.Jump(endLabel)
-		}
-	}
-
-	// Generar caso default si existe
-	if ctx.Default_case() != nil {
-		t.generator.SetLabel(defaultLabel)
-		t.generator.Comment("=== CASO DEFAULT ===")
-
-		defaultCtx := ctx.Default_case().(*compiler.DefaultCaseContext)
-
-		// DEBUG: Mostrar statements del default
-		fmt.Printf("🔍 Default statements: %d\n", len(defaultCtx.AllStmt()))
-		for j, stmt := range defaultCtx.AllStmt() {
-			fmt.Printf("🔍   Default statement %d: %s\n", j, stmt.GetText())
-		}
-
-		for _, stmt := range defaultCtx.AllStmt() {
-			t.translateNode(stmt)
-		}
-	}
-
-	// Etiqueta final
-	t.generator.SetLabel(endLabel)
-
-	// Limpiar etiquetas de break
-	if len(t.breakLabels) > 0 {
-		t.breakLabels = t.breakLabels[:len(t.breakLabels)-1]
-	}
-
-	t.generator.Comment("=== FIN SWITCH ===")
-}
-
-// translateForLoop traduce bucles for
-func (t *ARM64Translator) translateForLoop(ctx *compiler.ForStmtCondContext) {
-	t.generator.Comment("=== FOR LOOP ===")
-
-	startLabel := t.generator.GetLabel()
-	endLabel := t.generator.GetLabel()
-
-	// Etiqueta de inicio del bucle
-	t.generator.SetLabel(startLabel)
-
-	// Evaluar condición
-	t.translateExpression(ctx.Expression())
-
-	// Salir del bucle si la condición es falsa
-	t.generator.JumpIfZero(arm64.X0, endLabel)
-
-	// Ejecutar cuerpo del bucle
-	for _, stmt := range ctx.AllStmt() {
-		t.translateNode(stmt)
-	}
-
-	// Volver al inicio del bucle
-	t.generator.Jump(startLabel)
-
-	// Etiqueta final
-	t.generator.SetLabel(endLabel)
 }
 
 // === LLAMADAS A FUNCIONES ===
@@ -1051,6 +977,162 @@ func (t *ARM64Translator) translatePrintFunction(ctx *compiler.FuncCallContext, 
 	}
 }
 
+// === CONTROL DE FLUJO (simplificado) ===
+
+// translateIfStatement traduce declaraciones if-else
+func (t *ARM64Translator) translateIfStatement(ctx *compiler.IfStmtContext) {
+	t.generator.Comment("=== IF STATEMENT ===")
+
+	elseLabel := t.generator.GetLabel()
+	endLabel := t.generator.GetLabel()
+
+	// Evaluar la condición del primer if_chain
+	if len(ctx.AllIf_chain()) > 0 {
+		ifChain := ctx.AllIf_chain()[0]
+		if ifChainCtx, ok := ifChain.(*compiler.IfChainContext); ok {
+			// Evaluar condición
+			t.translateExpression(ifChainCtx.Expression())
+
+			// Saltar a else si la condición es falsa (0)
+			t.generator.JumpIfZero(arm64.X0, elseLabel)
+
+			// Ejecutar cuerpo del if
+			for _, stmt := range ifChainCtx.AllStmt() {
+				t.translateNode(stmt)
+			}
+
+			// Saltar al final para evitar ejecutar el else
+			t.generator.Jump(endLabel)
+		}
+	}
+
+	// Etiqueta else
+	t.generator.SetLabel(elseLabel)
+
+	// Si hay else, ejecutarlo
+	if ctx.Else_stmt() != nil {
+		elseCtx := ctx.Else_stmt().(*compiler.ElseStmtContext)
+		for _, stmt := range elseCtx.AllStmt() {
+			t.translateNode(stmt)
+		}
+	}
+
+	// Etiqueta final
+	t.generator.SetLabel(endLabel)
+}
+
+// translateSwitchStatement traduce declaraciones switch
+func (t *ARM64Translator) translateSwitchStatement(ctx *compiler.SwitchStmtContext) {
+	t.generator.Comment("=== SWITCH STATEMENT ===")
+
+	// Evaluar la expresión del switch una vez y guardarla
+	t.translateExpression(ctx.Expression())
+	t.generator.Comment("Guardar valor del switch en x19")
+	t.generator.Emit("mov x19, x0")
+
+	// Generar etiquetas
+	defaultLabel := t.generator.GetLabel()
+	endLabel := t.generator.GetLabel()
+	caseLabels := make([]string, 0)
+
+	// Push etiquetas de break
+	t.breakLabels = append(t.breakLabels, endLabel)
+
+	// Generar etiquetas para cada caso
+	cases := ctx.AllSwitch_case()
+	for range cases {
+		caseLabels = append(caseLabels, t.generator.GetLabel())
+	}
+
+	t.generator.Comment("=== COMPARACIONES DE CASOS ===")
+
+	// Generar comparaciones para cada caso
+	for i, switchCase := range cases {
+		if caseCtx, ok := switchCase.(*compiler.SwitchCaseContext); ok {
+			t.generator.Comment(fmt.Sprintf("Comparar caso %d", i))
+
+			// Evaluar la expresión del caso
+			t.translateExpression(caseCtx.Expression())
+
+			// Comparar con el valor del switch
+			t.generator.Compare("x19", "x0")
+			t.generator.Emit(fmt.Sprintf("beq %s", caseLabels[i]))
+		}
+	}
+
+	// Si ningún caso coincide, ir al default (o al final si no hay default)
+	if ctx.Default_case() != nil {
+		t.generator.Jump(defaultLabel)
+	} else {
+		t.generator.Jump(endLabel)
+	}
+
+	// Generar código para cada caso
+	for i, switchCase := range cases {
+		if caseCtx, ok := switchCase.(*compiler.SwitchCaseContext); ok {
+			t.generator.SetLabel(caseLabels[i])
+			t.generator.Comment(fmt.Sprintf("=== CASO %d ===", i))
+
+			// Ejecutar statements del caso
+			for _, stmt := range caseCtx.AllStmt() {
+				t.translateNode(stmt)
+			}
+
+			// Automáticamente saltar al final (break implícito)
+			t.generator.Jump(endLabel)
+		}
+	}
+
+	// Generar caso default si existe
+	if ctx.Default_case() != nil {
+		t.generator.SetLabel(defaultLabel)
+		t.generator.Comment("=== CASO DEFAULT ===")
+
+		defaultCtx := ctx.Default_case().(*compiler.DefaultCaseContext)
+		for _, stmt := range defaultCtx.AllStmt() {
+			t.translateNode(stmt)
+		}
+	}
+
+	// Etiqueta final
+	t.generator.SetLabel(endLabel)
+
+	// Limpiar etiquetas de break
+	if len(t.breakLabels) > 0 {
+		t.breakLabels = t.breakLabels[:len(t.breakLabels)-1]
+	}
+
+	t.generator.Comment("=== FIN SWITCH ===")
+}
+
+// translateForLoop traduce bucles for
+func (t *ARM64Translator) translateForLoop(ctx *compiler.ForStmtCondContext) {
+	t.generator.Comment("=== FOR LOOP ===")
+
+	startLabel := t.generator.GetLabel()
+	endLabel := t.generator.GetLabel()
+
+	// Etiqueta de inicio del bucle
+	t.generator.SetLabel(startLabel)
+
+	// Evaluar condición
+	t.translateExpression(ctx.Expression())
+
+	// Salir del bucle si la condición es falsa
+	t.generator.JumpIfZero(arm64.X0, endLabel)
+
+	// Ejecutar cuerpo del bucle
+	for _, stmt := range ctx.AllStmt() {
+		t.translateNode(stmt)
+	}
+
+	// Volver al inicio del bucle
+	t.generator.Jump(startLabel)
+
+	// Etiqueta final
+	t.generator.SetLabel(endLabel)
+}
+
 // === LIBRERÍA ESTÁNDAR ===
 
 // generateStandardLibrary genera las funciones básicas necesarias
@@ -1185,85 +1267,4 @@ func (t *ARM64Translator) GetErrors() []string {
 // HasErrors indica si hay errores
 func (t *ARM64Translator) HasErrors() bool {
 	return len(t.errors) > 0
-}
-
-// analyzeStringsInStatement busca strings en statements
-func (t *ARM64Translator) analyzeStringsInStatement(stmt antlr.ParseTree) {
-	switch ctx := stmt.(type) {
-	case *compiler.StmtContext:
-		if ctx.Func_call() != nil {
-			t.analyzeStringsInFunctionCall(ctx.Func_call().(*compiler.FuncCallContext))
-		}
-	case *compiler.FuncCallContext:
-		t.analyzeStringsInFunctionCall(ctx)
-	}
-}
-
-// analyzeStringsInFunctionCall busca strings en llamadas a funciones
-func (t *ARM64Translator) analyzeStringsInFunctionCall(ctx *compiler.FuncCallContext) {
-	// Verificar si es print o println
-	funcName := ctx.Id_pattern().GetText()
-	if funcName == "print" || funcName == "println" {
-		if ctx.Arg_list() != nil {
-			args := ctx.Arg_list().(*compiler.ArgListContext).AllFunc_arg()
-			for _, arg := range args {
-				if argCtx := arg.(*compiler.FuncArgContext); argCtx != nil {
-					if argCtx.Expression() != nil {
-						t.analyzeStringsInExpression(argCtx.Expression())
-					}
-				}
-			}
-		}
-	}
-}
-
-// analyzeStringsInExpression busca strings en expresiones
-func (t *ARM64Translator) analyzeStringsInExpression(expr antlr.ParseTree) {
-	if expr == nil {
-		return
-	}
-
-	switch ctx := expr.(type) {
-	case *compiler.LiteralExprContext:
-		t.analyzeStringsInExpression(ctx.Literal())
-	case *compiler.LiteralContext:
-		// Buscar string literals en el literal
-		for i := 0; i < ctx.GetChildCount(); i++ {
-			child := ctx.GetChild(i)
-			if stringCtx, ok := child.(*compiler.StringLiteralContext); ok {
-				// ENCONTRAMOS UN STRING! Procesarlo en la primera pasada
-				t.preProcessStringLiteral(stringCtx)
-			}
-		}
-	case *compiler.StringLiteralContext:
-		t.preProcessStringLiteral(ctx)
-	}
-}
-
-// preProcessStringLiteral procesa strings en la primera pasada
-func (t *ARM64Translator) preProcessStringLiteral(ctx *compiler.StringLiteralContext) {
-	text := ctx.GetText()
-	if len(text) >= 2 {
-		text = text[1 : len(text)-1] // Quitar comillas
-	}
-
-	// Procesar secuencias de escape
-	text = strings.ReplaceAll(text, "\\n", "\n")
-	text = strings.ReplaceAll(text, "\\t", "\t")
-	text = strings.ReplaceAll(text, "\\\"", "\"")
-	text = strings.ReplaceAll(text, "\\\\", "\\")
-
-	// NUEVO: Verificar si ya fue procesado
-	if existingLabel, exists := t.stringRegistry[text]; exists {
-		fmt.Printf("🔄 String \"%s\" ya procesado como %s\n", text, existingLabel)
-		return
-	}
-
-	// Agregar al generador
-	stringLabel := t.generator.AddStringLiteral(text)
-
-	// NUEVO: Registrar para evitar duplicados
-	t.stringRegistry[text] = stringLabel
-
-	fmt.Printf("🔍 STRING REGISTRADO: \"%s\" -> %s\n", text, stringLabel)
 }
