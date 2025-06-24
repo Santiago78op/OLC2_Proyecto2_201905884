@@ -14,7 +14,7 @@
     <header class="ide-header">
         <div class="logo-section">
             <h1>🍒 VLan Cherry IDE</h1>
-            <span class="version">v3.1.0</span>
+            <span class="version">v3.2.0</span>
         </div>
         <div class="header-controls">
             <button id="newFileBtn" class="header-btn" title="Nuevo Archivo (Ctrl+N)">
@@ -30,6 +30,13 @@
             <button id="executeBtn" class="header-btn execute-btn" title="Ejecutar (F5)">
                 ▶️ Ejecutar
             </button>
+            <button id="compileBtn" class="header-btn compile-btn" title="Solo Compilar (F6)">
+                🔧 Compilar
+            </button>
+            <button id="runARM64Btn" class="header-btn arm64-btn" title="Ejecutar ARM64 (F7)" disabled>
+                ⚙️ Ejecutar ARM64
+            </button>
+            <div class="separator"></div>
             <div class="connection-status" id="connectionStatus">
                 🔴 Desconectado
             </div>
@@ -67,7 +74,7 @@
                 <div class="welcome-screen" id="welcomeScreen">
                     <div class="welcome-content">
                         <h2>🍒 Bienvenido a VLan Cherry IDE</h2>
-                        <p>Un entorno de desarrollo integrado para el lenguaje VLan Cherry</p>
+                        <p>Un entorno de desarrollo integrado para el lenguaje VLan Cherry con compilación a ARM64</p>
                         <div class="welcome-actions">
                             <button class="welcome-btn" id="welcomeNewFile">📄 Crear nuevo archivo</button>
                             <button class="welcome-btn" id="welcomeOpenFile">📂 Abrir archivo existente</button>
@@ -77,6 +84,8 @@
                             <ul>
                                 <li>✅ Editor con resaltado de sintaxis</li>
                                 <li>✅ Análisis léxico, sintáctico y semántico</li>
+                                <li>✅ Compilación a ARM64 Assembly</li>
+                                <li>✅ Ejecución de código ARM64</li>
                                 <li>✅ Reporte de errores en tiempo real</li>
                                 <li>✅ Tabla de símbolos</li>
                                 <li>✅ Visualización del AST</li>
@@ -91,56 +100,138 @@
                     <div class="editor-info">
                         <span id="currentFile">Sin archivo</span>
                         <span class="editor-stats">
-                                <span id="lineColumn">Línea 1, Columna 1</span>
-                                <span id="fileStats">0 líneas</span>
-                            </span>
+                            <span id="lineColumn">Línea 1, Columna 1</span>
+                            <span id="fileStats">0 líneas</span>
+                        </span>
                     </div>
                     <div id="monaco-editor"></div>
                 </div>
             </div>
         </div>
 
-        <!-- Right Panel - Console Only -->
+        <!-- Right Panel - Enhanced Console & Reports -->
         <div class="right-panel">
-            <div class="panel-header">
-                <h3>📟 Consola de Salida</h3>
-                <div class="panel-controls">
-                    <button id="showReportsBtn" class="panel-btn" title="Ver reportes detallados">
-                        📊 Reportes
-                    </button>
-                    <button id="clearConsoleBtn" class="panel-btn" title="Limpiar consola">
-                        🗑️ Limpiar
-                    </button>
-                </div>
+            <!-- Panel Tabs -->
+            <div class="panel-tabs">
+                <button class="panel-tab active" data-panel="console">📟 Consola</button>
+                <button class="panel-tab" data-panel="arm64">⚙️ ARM64</button>
+                <button class="panel-tab" data-panel="reports">📊 Reportes</button>
             </div>
-            
-            <!-- Console Output Container -->
-            <div class="console-output" id="consoleOutput">
-                <!-- Estado inicial -->
-                <div class="console-empty" id="consoleEmpty">
-                    <div class="console-empty-icon">📟</div>
-                    <p>Consola de VLan Cherry IDE</p>
-                    <small>Los mensajes de ejecución aparecerán aquí</small>
+
+            <!-- Console Panel -->
+            <div class="panel-content active" id="consolePanel">
+                <div class="panel-header">
+                    <h3>📟 Consola de Salida</h3>
+                    <div class="panel-controls">
+                        <button id="clearConsoleBtn" class="panel-btn" title="Limpiar consola">
+                            🗑️ Limpiar
+                        </button>
+                    </div>
                 </div>
                 
-                <!-- Mensaje inicial -->
-                <div class="console-message system">
-                    <span class="timestamp">[00:00:00]</span>
-                    <span class="message">VLan Cherry IDE iniciado correctamente</span>
+                <div class="console-output" id="consoleOutput">
+                    <div class="console-message system">
+                        <span class="timestamp">[00:00:00]</span>
+                        <span class="message">VLan Cherry IDE iniciado correctamente</span>
+                    </div>
+                    <div class="console-message info">
+                        <span class="timestamp">[00:00:00]</span>
+                        <span class="message">Conectando con el backend...</span>
+                    </div>
                 </div>
-                <div class="console-message info">
-                    <span class="timestamp">[00:00:00]</span>
-                    <span class="message">Conectando con el backend...</span>
+            </div>
+
+            <!-- ARM64 Panel -->
+            <div class="panel-content" id="arm64Panel">
+                <div class="panel-header">
+                    <h3>⚙️ Código ARM64</h3>
+                    <div class="panel-controls">
+                        <button id="downloadARM64Btn" class="panel-btn" title="Descargar código ARM64" disabled>
+                            📥 Descargar
+                        </button>
+                        <button id="copyARM64Btn" class="panel-btn" title="Copiar código ARM64" disabled>
+                            📋 Copiar
+                        </button>
+                        <button id="viewARM64Btn" class="panel-btn" title="Ver en ventana completa" disabled>
+                            🔍 Ver
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="arm64-container">
+                    <div class="arm64-status" id="arm64Status">
+                        <div class="arm64-empty">
+                            <div class="arm64-empty-icon">⚙️</div>
+                            <p>No hay código ARM64 generado</p>
+                            <small>Compila código VLan Cherry para generar ARM64</small>
+                        </div>
+                    </div>
+                    
+                    <div class="arm64-code-wrapper" id="arm64CodeWrapper" style="display: none;">
+                        <pre class="arm64-code" id="arm64Code"></pre>
+                    </div>
+                    
+                    <div class="arm64-execution" id="arm64Execution" style="display: none;">
+                        <div class="execution-header">
+                            <h4>🚀 Ejecución ARM64</h4>
+                            <div class="execution-controls">
+                                <button id="executeARM64LocalBtn" class="execute-arm64-btn" title="Ejecutar localmente (si es posible)">
+                                    💻 Local
+                                </button>
+                                <button id="executeARM64QEMUBtn" class="execute-arm64-btn" title="Ejecutar en QEMU">
+                                    🖥️ QEMU
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div class="execution-output" id="arm64ExecutionOutput">
+                            <div class="execution-message info">
+                                <span class="timestamp">[00:00:00]</span>
+                                <span class="message">Listo para ejecutar código ARM64</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Reports Panel -->
+            <div class="panel-content" id="reportsPanel">
+                <div class="panel-header">
+                    <h3>📊 Reportes</h3>
+                    <div class="panel-controls">
+                        <button id="showFullReportsBtn" class="panel-btn" title="Ver reportes completos">
+                            📈 Completo
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="reports-summary">
+                    <div class="report-item">
+                        <span class="report-label">Errores:</span>
+                        <span class="report-value" id="errorCount">0</span>
+                    </div>
+                    <div class="report-item">
+                        <span class="report-label">Símbolos:</span>
+                        <span class="report-value" id="symbolCount">0</span>
+                    </div>
+                    <div class="report-item">
+                        <span class="report-label">AST:</span>
+                        <span class="report-value" id="astStatus">No generado</span>
+                    </div>
+                    <div class="report-item">
+                        <span class="report-label">ARM64:</span>
+                        <span class="report-value" id="arm64StatusSummary">No generado</span>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Reports Modal -->
+    <!-- Reports Modal (Enhanced) -->
     <div class="modal-overlay" id="reportsModal" style="display: none;">
         <div class="modal-container">
             <div class="modal-header">
-                <h2>📊 Reportes de Análisis</h2>
+                <h2>📊 Reportes de Análisis Completos</h2>
                 <button class="modal-close" id="closeReportsModal">×</button>
             </div>
 
@@ -148,6 +239,7 @@
                 <button class="modal-tab active" data-tab="errors">❌ Errores</button>
                 <button class="modal-tab" data-tab="symbols">🔤 Tabla de Símbolos</button>
                 <button class="modal-tab" data-tab="ast">🌳 AST</button>
+                <button class="modal-tab" data-tab="arm64">⚙️ ARM64</button>
             </div>
 
             <div class="modal-content">
@@ -241,6 +333,91 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- ARM64 Tab -->
+                <div class="modal-tab-content" id="arm64Tab">
+                    <div class="report-header">
+                        <h3>Código ARM64 Assembly</h3>
+                        <div class="report-controls">
+                            <div class="arm64-info">
+                                <span class="report-count" id="arm64LinesCount">0 líneas</span>
+                                <span class="report-count" id="arm64SizeCount">0 bytes</span>
+                            </div>
+                            <div class="download-controls">
+                                <button class="download-btn" id="downloadARM64CodeBtn">📥 Descargar .s</button>
+                                <button class="download-btn" id="downloadARM64TextBtn">📄 Descargar .txt</button>
+                                <button class="download-btn" id="copyARM64CodeBtn">📋 Copiar</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="arm64-full-container">
+                        <div class="arm64-editor-wrapper">
+                            <div id="arm64Editor" class="arm64-editor">
+                                <div class="empty-arm64">
+                                    <div class="empty-arm64-icon">⚙️</div>
+                                    <p>No hay código ARM64 generado</p>
+                                    <small>Compila código VLan Cherry para ver el ARM64 assembly</small>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="arm64-execution-panel">
+                            <div class="execution-panel-header">
+                                <h4>🚀 Ejecución ARM64</h4>
+                                <div class="execution-status" id="arm64ExecutionStatus">
+                                    <span class="status-indicator">🔴</span>
+                                    <span class="status-text">No ejecutado</span>
+                                </div>
+                            </div>
+                            
+                            <div class="execution-buttons">
+                                <button id="executeARM64FullBtn" class="execute-full-btn" disabled>
+                                    ▶️ Ejecutar ARM64
+                                </button>
+                                <button id="assembleOnlyBtn" class="assemble-btn" disabled>
+                                    🔧 Solo Ensamblar
+                                </button>
+                            </div>
+                            
+                            <div class="execution-output-full" id="arm64ExecutionOutputFull">
+                                <div class="output-header">
+                                    <h5>📤 Salida de Ejecución</h5>
+                                    <button id="clearARM64OutputBtn" class="clear-output-btn">🗑️</button>
+                                </div>
+                                <div class="output-content" id="arm64OutputContent">
+                                    <div class="execution-message system">
+                                        <span class="timestamp">[00:00:00]</span>
+                                        <span class="message">Listo para ejecutar código ARM64</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ARM64 Viewer Modal -->
+    <div class="modal-overlay" id="arm64ViewerModal" style="display: none;">
+        <div class="modal-container arm64-viewer-container">
+            <div class="modal-header">
+                <h2>⚙️ Visor de Código ARM64</h2>
+                <button class="modal-close" id="closeARM64ViewerModal">×</button>
+            </div>
+            <div class="arm64-viewer-content">
+                <div class="arm64-viewer-header">
+                    <div class="viewer-info">
+                        <span id="viewerFileName">archivo.s</span>
+                        <span id="viewerFileStats">0 líneas, 0 caracteres</span>
+                    </div>
+                    <div class="viewer-controls">
+                        <button id="viewerCopyBtn" class="viewer-btn">📋 Copiar</button>
+                        <button id="viewerDownloadBtn" class="viewer-btn">📥 Descargar</button>
+                        <button id="viewerExecuteBtn" class="viewer-btn">▶️ Ejecutar</button>
+                    </div>
+                </div>
+                <div class="arm64-viewer-editor" id="arm64ViewerEditor"></div>
             </div>
         </div>
     </div>
@@ -252,7 +429,8 @@
         </div>
         <div class="status-right">
             <span id="executionTime"></span>
-            <span>VLan Cherry</span>
+            <span id="arm64CompileTime"></span>
+            <span>VLan Cherry ARM64</span>
         </div>
     </div>
 </div>
@@ -266,6 +444,7 @@
 <script src="js/editor.js"></script>
 <script src="js/file-manager.js"></script>
 <script src="js/reports.js"></script>
+<script src="js/arm64-manager.js"></script>
 <script src="js/ide.js"></script>
 </body>
 </html>
