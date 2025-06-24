@@ -17,14 +17,19 @@ type ARM64Translator struct {
 
 	userFunctions   map[string]*compiler.FuncDeclContext
 	currentFunction string
+
+	breakLabels    []string // Etiquetas para manejar break en loops
+	continueLabels []string // Etiquetas para manejar continue en loops
 }
 
 // NewARM64Translator crea un nuevo traductor
 func NewARM64Translator() *ARM64Translator {
 	return &ARM64Translator{
-		generator:     arm64.NewARM64Generator(),
-		errors:        make([]string, 0),
-		userFunctions: make(map[string]*compiler.FuncDeclContext),
+		generator:      arm64.NewARM64Generator(),
+		errors:         make([]string, 0),
+		userFunctions:  make(map[string]*compiler.FuncDeclContext),
+		breakLabels:    make([]string, 0),
+		continueLabels: make([]string, 0),
 	}
 }
 
@@ -42,7 +47,7 @@ func (t *ARM64Translator) TranslateProgram(tree antlr.ParseTree) (string, []stri
 	// Generar header del programa
 	t.generator.GenerateHeader()
 
-	// Traducir el contenido del programa
+	// Traducir el contenido del programa / Segunda pasada
 	t.translateNode(tree)
 
 	// Generar footer del programa
@@ -172,6 +177,12 @@ func (t *ARM64Translator) analyzeVariables(node antlr.ParseTree) {
 		if ctx.If_stmt() != nil {
 			t.analyzeVariables(ctx.If_stmt())
 		}
+
+		// Ingreso de Switch
+		if ctx.Switch_stmt() != nil {
+			t.analyzeVariables(ctx.Switch_stmt())
+		}
+
 		if ctx.For_stmt() != nil {
 			t.analyzeVariables(ctx.For_stmt())
 		}
@@ -224,6 +235,39 @@ func (t *ARM64Translator) analyzeVariables(node antlr.ParseTree) {
 			}
 		}
 
+	case *compiler.SwitchStmtContext:
+		fmt.Println("Analizando Switch Statement", ctx)
+
+		// Analizar cada case
+		cases := ctx.AllSwitch_case()
+		fmt.Printf("Número de cases: %d\n", len(cases))
+
+		// Ciclo for para analizar cada case
+		for i, switchCase := range cases {
+			if caseCtx, ok := switchCase.(*compiler.SwitchCaseContext); ok {
+				fmt.Printf("Analizando case %d: %s\n", i, caseCtx.GetText())
+
+				// Analizar todas las declaraciones dentro del case
+
+				statements := caseCtx.AllStmt()
+				fmt.Printf("Número de statements en case %d: %d\n", i, len(statements))
+
+				for j, stmt := range statements {
+					fmt.Printf("Analizando statement %d en case %d: %T\n", j, i, stmt)
+					t.analyzeVariables(stmt)
+				}
+			}
+		}
+
+		// Analizar el caso default si existe
+		if ctx.Default_case() != nil {
+			defaultCtx := ctx.Default_case().(*compiler.DefaultCaseContext)
+			fmt.Println("Analizando default case")
+			for _, stmt := range defaultCtx.AllStmt() {
+				t.analyzeVariables(stmt)
+			}
+		}
+
 	case *compiler.ForStmtCondContext:
 		// Analizar el cuerpo del for
 		for _, stmt := range ctx.AllStmt() {
@@ -264,6 +308,8 @@ func (t *ARM64Translator) translateNode(node antlr.ParseTree) {
 		t.translateAssignment(ctx)
 	case *compiler.IfStmtContext:
 		t.translateIfStatement(ctx)
+	case *compiler.SwitchStmtContext:
+		t.translateSwitchStatement(ctx)
 	case *compiler.ForStmtCondContext:
 		t.translateForLoop(ctx)
 	case *compiler.FuncCallContext:
@@ -328,9 +374,18 @@ func (t *ARM64Translator) translateReturnStatementFromTransfer(ctx *compiler.Tra
 	t.generator.Emit("ret")
 }
 
+// Modificar translateBreakStatementFromTransfer
 func (t *ARM64Translator) translateBreakStatementFromTransfer(ctx *compiler.Transfer_stmtContext) {
 	t.generator.Comment("=== BREAK STATEMENT ===")
-	// TODO: Implementar break
+
+	// Verificar si estamos en un contexto que permite break
+	if len(t.breakLabels) > 0 {
+		// Saltar a la etiqueta de break más reciente
+		breakLabel := t.breakLabels[len(t.breakLabels)-1]
+		t.generator.Jump(breakLabel)
+	} else {
+		t.addError("Break statement fuera de contexto válido (switch/loop)")
+	}
 }
 
 func (t *ARM64Translator) translateContinueStatementFromTransfer(ctx *compiler.Transfer_stmtContext) {
@@ -365,6 +420,8 @@ func (t *ARM64Translator) translateStatement(ctx *compiler.StmtContext) {
 		t.translateNode(ctx.Assign_stmt())
 	} else if ctx.If_stmt() != nil {
 		t.translateNode(ctx.If_stmt())
+	} else if ctx.Switch_stmt() != nil {
+		t.translateNode(ctx.Switch_stmt())
 	} else if ctx.For_stmt() != nil {
 		t.translateNode(ctx.For_stmt())
 	} else if ctx.Func_call() != nil {
@@ -469,6 +526,8 @@ func (t *ARM64Translator) translateExpression(expr antlr.ParseTree) {
 	switch ctx := expr.(type) {
 	case *compiler.IntLiteralContext:
 		t.translateIntLiteral(ctx)
+	case *compiler.StringLiteralContext:
+		t.translateStringLiteral(ctx)
 	case *compiler.IdPatternExprContext:
 		t.translateVariable(ctx)
 	case *compiler.BinaryExprContext:
@@ -672,6 +731,92 @@ func (t *ARM64Translator) translateIfStatement(ctx *compiler.IfStmtContext) {
 
 	// Etiqueta final
 	t.generator.SetLabel(endLabel)
+}
+
+// translateSwitchStatement traduce declaraciones switch
+func (t *ARM64Translator) translateSwitchStatement(ctx *compiler.SwitchStmtContext) {
+	t.generator.Comment("=== SWITCH STATEMENT ===")
+
+	// Evaluar la expresión del switch una vez y guardarla
+	t.translateExpression(ctx.Expression())
+	t.generator.Comment("Guardar valor del switch en x19")
+	t.generator.Emit("mov x19, x0") // Guardar valor del switch
+
+	// Generar etiquetas
+	defaultLabel := t.generator.GetLabel()
+	endLabel := t.generator.GetLabel()
+	caseLabels := make([]string, 0)
+
+	// Push etiquetas de break y continue
+	t.breakLabels = append(t.breakLabels, endLabel)       // Etiqueta de fin del switch
+	t.continueLabels = append(t.continueLabels, endLabel) // Etiqueta de fin del switch
+
+	// Generar etiquetas para cada caso
+	cases := ctx.AllSwitch_case()
+	for range cases {
+		caseLabels = append(caseLabels, t.generator.GetLabel())
+	}
+
+	t.generator.Comment("=== COMPARACIONES DE CASOS ===")
+
+	// Generar comparaciones para cada caso
+	for i, switchCase := range cases {
+		if caseCtx, ok := switchCase.(*compiler.SwitchCaseContext); ok {
+			t.generator.Comment(fmt.Sprintf("Comparar caso %d", i))
+
+			// Evaluar la expresión del caso
+			t.translateExpression(caseCtx.Expression())
+
+			// Comparar con el valor del switch
+			t.generator.Compare("x19", "x0")
+			t.generator.Emit(fmt.Sprintf("beq %s", caseLabels[i]))
+		}
+	}
+
+	// Si ningún caso coincide, ir al default (o al final si no hay default)
+	if ctx.Default_case() != nil {
+		t.generator.Jump(defaultLabel)
+	} else {
+		t.generator.Jump(endLabel)
+	}
+
+	// Generar código para cada caso
+	for i, switchCase := range cases {
+		if caseCtx, ok := switchCase.(*compiler.SwitchCaseContext); ok {
+			t.generator.SetLabel(caseLabels[i])
+			t.generator.Comment(fmt.Sprintf("=== CASO %d ===", i))
+
+			// Ejecutar statements del caso
+			for _, stmt := range caseCtx.AllStmt() {
+				t.translateNode(stmt)
+			}
+
+			// TODO: Manejar break statements
+			// Por ahora, automáticamente saltar al final
+			t.generator.Jump(endLabel)
+		}
+	}
+
+	// Generar caso default si existe
+	if ctx.Default_case() != nil {
+		t.generator.SetLabel(defaultLabel)
+		t.generator.Comment("=== CASO DEFAULT ===")
+
+		defaultCtx := ctx.Default_case().(*compiler.DefaultCaseContext)
+		for _, stmt := range defaultCtx.AllStmt() {
+			t.translateNode(stmt)
+		}
+	}
+
+	// Etiqueta final
+	t.generator.SetLabel(endLabel)
+
+	// Limpiar etiquetas de break y continue
+	if len(t.breakLabels) > 0 {
+		t.breakLabels = t.breakLabels[:len(t.breakLabels)-1] // Quitar etiqueta de fin del switch
+	}
+
+	t.generator.Comment("=== FIN SWITCH ===")
 }
 
 // translateForLoop traduce bucles for

@@ -237,6 +237,7 @@ func executeCode(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("🔹 Tiempo total: %v\n", reportEndTime.Sub(startTime))
 	fmt.Printf("🔹 Salida: %s\n", output)
 
+	// =========== TRADUCCIÓN A ARM64 ===========
 	var arm64Code string
 	var arm64Errors []string
 	var hasValidARM64 bool
