@@ -18,8 +18,9 @@ type ARM64Translator struct {
 	userFunctions   map[string]*compiler.FuncDeclContext
 	currentFunction string
 
-	breakLabels    []string // Etiquetas para manejar break en loops
-	continueLabels []string // Etiquetas para manejar continue en loops
+	breakLabels    []string          // Etiquetas para manejar break en loops
+	continueLabels []string          // Etiquetas para manejar continue en loops
+	stringRegistry map[string]string // texto -> etiqueta Para evitar procesar strings dos veces
 }
 
 // NewARM64Translator crea un nuevo traductor
@@ -30,6 +31,7 @@ func NewARM64Translator() *ARM64Translator {
 		userFunctions:  make(map[string]*compiler.FuncDeclContext),
 		breakLabels:    make([]string, 0),
 		continueLabels: make([]string, 0),
+		stringRegistry: make(map[string]string),
 	}
 }
 
@@ -250,14 +252,18 @@ func (t *ARM64Translator) analyzeVariables(node antlr.ParseTree) {
 			if caseCtx, ok := switchCase.(*compiler.SwitchCaseContext); ok {
 				fmt.Printf("Analizando case %d: %s\n", i, caseCtx.GetText())
 
-				// Analizar todas las declaraciones dentro del case
+				// NUEVO: Analizar strings en las expresiones del case
+				t.analyzeStringsInExpression(caseCtx.Expression())
 
+				// Analizar todas las declaraciones dentro del case
 				statements := caseCtx.AllStmt()
 				fmt.Printf("Número de statements en case %d: %d\n", i, len(statements))
 
 				for j, stmt := range statements {
 					fmt.Printf("Analizando statement %d en case %d: %T\n", j, i, stmt)
 					t.analyzeVariables(stmt)
+					// NUEVO: Analizar strings en statements
+					t.analyzeStringsInStatement(stmt)
 				}
 			}
 		}
@@ -268,6 +274,8 @@ func (t *ARM64Translator) analyzeVariables(node antlr.ParseTree) {
 			fmt.Println("Analizando default case")
 			for _, stmt := range defaultCtx.AllStmt() {
 				t.analyzeVariables(stmt)
+				// NUEVO: Analizar strings en default case
+				t.analyzeStringsInStatement(stmt)
 			}
 		}
 
@@ -601,12 +609,28 @@ func (t *ARM64Translator) translateFloatLiteral(ctx *compiler.FloatLiteralContex
 }
 
 func (t *ARM64Translator) translateStringLiteral(ctx *compiler.StringLiteralContext) {
-	// Por simplicidad, cargar la longitud de la cadena
 	text := ctx.GetText()
 	if len(text) >= 2 {
 		text = text[1 : len(text)-1] // Quitar comillas
 	}
-	t.generator.LoadImmediate(arm64.X0, len(text))
+
+	// Procesar secuencias de escape
+	text = strings.ReplaceAll(text, "\\n", "\n")
+	text = strings.ReplaceAll(text, "\\t", "\t")
+	text = strings.ReplaceAll(text, "\\\"", "\"")
+	text = strings.ReplaceAll(text, "\\\\", "\\")
+
+	// NUEVO: Verificar si ya fue procesado en la primera pasada
+	if existingLabel, exists := t.stringRegistry[text]; exists {
+		// Ya existe, usar la etiqueta existente
+		t.generator.Comment(fmt.Sprintf("Reutilizar string \"%s\" con etiqueta %s", text, existingLabel))
+		t.generator.Emit(fmt.Sprintf("adr x0, %s", existingLabel))
+		return
+	}
+
+	// Si no existe en el registro, es un error (debería haberse procesado en primera pasada)
+	t.addError(fmt.Sprintf("String \"%s\" no fue procesado en primera pasada", text))
+	t.generator.LoadImmediate(arm64.X0, 0) // Fallback
 }
 
 func (t *ARM64Translator) translateBoolLiteral(ctx *compiler.BoolLiteralContext) {
@@ -736,23 +760,25 @@ func (t *ARM64Translator) translateIfStatement(ctx *compiler.IfStmtContext) {
 	t.generator.SetLabel(endLabel)
 }
 
-// translateSwitchStatement traduce declaraciones switch
+// translateSwitchStatement traduce declaraciones switch - VERSIÓN CORREGIDA
 func (t *ARM64Translator) translateSwitchStatement(ctx *compiler.SwitchStmtContext) {
 	t.generator.Comment("=== SWITCH STATEMENT ===")
+
+	// Debug: Mostrar el valor del switch
+	fmt.Printf("🔍 Switch expression: %s\n", ctx.Expression().GetText())
 
 	// Evaluar la expresión del switch una vez y guardarla
 	t.translateExpression(ctx.Expression())
 	t.generator.Comment("Guardar valor del switch en x19")
-	t.generator.Emit("mov x19, x0") // Guardar valor del switch
+	t.generator.Emit("mov x19, x0")
 
 	// Generar etiquetas
 	defaultLabel := t.generator.GetLabel()
 	endLabel := t.generator.GetLabel()
 	caseLabels := make([]string, 0)
 
-	// Push etiquetas de break y continue
-	t.breakLabels = append(t.breakLabels, endLabel)       // Etiqueta de fin del switch
-	t.continueLabels = append(t.continueLabels, endLabel) // Etiqueta de fin del switch
+	// Push etiquetas de break
+	t.breakLabels = append(t.breakLabels, endLabel)
 
 	// Generar etiquetas para cada caso
 	cases := ctx.AllSwitch_case()
@@ -766,6 +792,9 @@ func (t *ARM64Translator) translateSwitchStatement(ctx *compiler.SwitchStmtConte
 	for i, switchCase := range cases {
 		if caseCtx, ok := switchCase.(*compiler.SwitchCaseContext); ok {
 			t.generator.Comment(fmt.Sprintf("Comparar caso %d", i))
+
+			// DEBUG: Mostrar valor del caso
+			fmt.Printf("🔍 Case %d expression: %s\n", i, caseCtx.Expression().GetText())
 
 			// Evaluar la expresión del caso
 			t.translateExpression(caseCtx.Expression())
@@ -789,13 +818,18 @@ func (t *ARM64Translator) translateSwitchStatement(ctx *compiler.SwitchStmtConte
 			t.generator.SetLabel(caseLabels[i])
 			t.generator.Comment(fmt.Sprintf("=== CASO %d ===", i))
 
+			// DEBUG: Mostrar statements del caso
+			fmt.Printf("🔍 Case %d statements: %d\n", i, len(caseCtx.AllStmt()))
+			for j, stmt := range caseCtx.AllStmt() {
+				fmt.Printf("🔍   Statement %d: %s\n", j, stmt.GetText())
+			}
+
 			// Ejecutar statements del caso
 			for _, stmt := range caseCtx.AllStmt() {
 				t.translateNode(stmt)
 			}
 
-			// TODO: Manejar break statements
-			// Por ahora, automáticamente saltar al final
+			// Automáticamente saltar al final (break implícito)
 			t.generator.Jump(endLabel)
 		}
 	}
@@ -806,6 +840,13 @@ func (t *ARM64Translator) translateSwitchStatement(ctx *compiler.SwitchStmtConte
 		t.generator.Comment("=== CASO DEFAULT ===")
 
 		defaultCtx := ctx.Default_case().(*compiler.DefaultCaseContext)
+
+		// DEBUG: Mostrar statements del default
+		fmt.Printf("🔍 Default statements: %d\n", len(defaultCtx.AllStmt()))
+		for j, stmt := range defaultCtx.AllStmt() {
+			fmt.Printf("🔍   Default statement %d: %s\n", j, stmt.GetText())
+		}
+
 		for _, stmt := range defaultCtx.AllStmt() {
 			t.translateNode(stmt)
 		}
@@ -814,9 +855,9 @@ func (t *ARM64Translator) translateSwitchStatement(ctx *compiler.SwitchStmtConte
 	// Etiqueta final
 	t.generator.SetLabel(endLabel)
 
-	// Limpiar etiquetas de break y continue
+	// Limpiar etiquetas de break
 	if len(t.breakLabels) > 0 {
-		t.breakLabels = t.breakLabels[:len(t.breakLabels)-1] // Quitar etiqueta de fin del switch
+		t.breakLabels = t.breakLabels[:len(t.breakLabels)-1]
 	}
 
 	t.generator.Comment("=== FIN SWITCH ===")
@@ -963,18 +1004,6 @@ func (t *ARM64Translator) translateNativeFunction(ctx *compiler.FuncCallContext)
 func (t *ARM64Translator) translatePrintFunction(ctx *compiler.FuncCallContext, withNewline bool) {
 	t.generator.Comment("=== FUNCIÓN PRINT ===")
 
-	// DEBUG: Ver si hay argumentos
-	fmt.Printf("🔍 Print function - Arg_list: %v\n", ctx.Arg_list() != nil)
-	if ctx.Arg_list() != nil {
-		args := ctx.Arg_list().(*compiler.ArgListContext).AllFunc_arg()
-		fmt.Printf("🔍 Número de argumentos: %d\n", len(args))
-
-		for i, arg := range args {
-			fmt.Printf("🔍 Argumento %d: %T = %s\n", i, arg, arg.GetText())
-		}
-	}
-
-	// Procesar argumentos
 	if ctx.Arg_list() != nil {
 		args := ctx.Arg_list().(*compiler.ArgListContext).AllFunc_arg()
 
@@ -986,54 +1015,35 @@ func (t *ARM64Translator) translatePrintFunction(ctx *compiler.FuncCallContext, 
 				t.generator.CallFunction("print_char")
 			}
 
-			// Evaluar el argumento
 			if argCtx := arg.(*compiler.FuncArgContext); argCtx != nil {
-				fmt.Printf("🔍 FuncArg: %s\n", argCtx.GetText())
-
-				// Verificar si es expression
 				if argCtx.Expression() != nil {
-					fmt.Printf("🔍 Evaluando Expression: %s\n", argCtx.Expression().GetText())
-					t.translateExpression(argCtx.Expression())
-					t.generator.CallFunction("print_integer")
-				} else if argCtx.Id_pattern() != nil { // Verificar si es id_pattern
-					fmt.Printf("🔍 Evaluando Id_pattern: %s\n", argCtx.Id_pattern().GetText())
-					// Crear un contexto de expresión temporal para el id_pattern
+					// Determinar si es string o número
+					exprText := argCtx.Expression().GetText()
+
+					if strings.HasPrefix(exprText, "\"") && strings.HasSuffix(exprText, "\"") {
+						// Es un string literal
+						t.generator.Comment(fmt.Sprintf("Imprimiendo string: %s", exprText))
+						t.translateExpression(argCtx.Expression())
+						t.generator.CallFunction("print_string")
+					} else {
+						// Es una expresión numérica
+						t.translateExpression(argCtx.Expression())
+						t.generator.CallFunction("print_integer")
+					}
+				} else if argCtx.Id_pattern() != nil {
+					// Variable - por ahora asumimos que es numérica
 					varName := argCtx.Id_pattern().GetText()
 					if t.generator.VariableExists(varName) {
 						t.generator.LoadVariable(arm64.X0, varName)
 						t.generator.CallFunction("print_integer")
 					} else {
-						t.addError(fmt.Sprintf("Variable '%s' no encontrada en print", varName))
-					}
-				} else {
-					fmt.Printf("🔍 Argumento sin Expression ni Id_pattern válidos\n")
-					// Fallback: intentar procesar como texto
-					argText := argCtx.GetText()
-					fmt.Printf("🔍 Fallback - procesando texto: %s\n", argText)
-
-					// Si es un nombre de variable, intentar cargarla
-					if t.generator.VariableExists(argText) {
-						t.generator.LoadVariable(arm64.X0, argText)
-						t.generator.CallFunction("print_integer")
-					} else {
-						// Si es un número literal
-						if value, err := strconv.Atoi(argText); err == nil {
-							t.generator.LoadImmediate(arm64.X0, value)
-							t.generator.CallFunction("print_integer")
-						} else {
-							t.addError(fmt.Sprintf("No se puede procesar argumento: %s", argText))
-						}
+						t.addError(fmt.Sprintf("Variable '%s' no encontrada", varName))
 					}
 				}
-			} else {
-				fmt.Printf("🔍 argCtx es nil\n")
 			}
 		}
-	} else {
-		fmt.Printf("🔍 No hay argumentos para imprimir\n")
 	}
 
-	// Si es println, agregar salto de línea
 	if withNewline {
 		t.generator.Comment("Imprimir salto de línea")
 		t.generator.LoadImmediate(arm64.X0, 10) // ASCII newline
@@ -1124,6 +1134,40 @@ print_char:
     add sp, sp, #16              // Limpiar buffer
     ldp x29, x30, [sp], #16
     ret`)
+
+	t.generator.EmitRaw(`
+print_string:
+    // Función para imprimir strings
+    // Input: x0 = dirección del string (terminado en null)
+    stp x29, x30, [sp, #-16]!    // Guardar registros
+    stp x19, x20, [sp, #-16]!
+    
+    mov x19, x0                   // x19 = dirección del string
+    
+    // Encontrar la longitud del string
+    mov x20, #0                   // x20 = contador de longitud
+    
+strlen_loop:
+    ldrb w1, [x19, x20]          // Cargar byte del string
+    cbz w1, strlen_done          // Si es 0 (null terminator), terminar
+    add x20, x20, #1             // Incrementar contador
+    b strlen_loop
+    
+strlen_done:
+    // Verificar si el string está vacío
+    cbz x20, print_string_done
+    
+    // Syscall write(1, string, length)
+    mov x0, #1                   // File descriptor: stdout
+    mov x1, x19                  // Buffer: dirección del string
+    mov x2, x20                  // Length: longitud calculada
+    mov x8, #64                  // Syscall number: write
+    svc #0                       // Llamada al sistema
+    
+print_string_done:
+    ldp x19, x20, [sp], #16      // Restaurar registros
+    ldp x29, x30, [sp], #16
+    ret`)
 }
 
 // === UTILIDADES ===
@@ -1141,4 +1185,85 @@ func (t *ARM64Translator) GetErrors() []string {
 // HasErrors indica si hay errores
 func (t *ARM64Translator) HasErrors() bool {
 	return len(t.errors) > 0
+}
+
+// analyzeStringsInStatement busca strings en statements
+func (t *ARM64Translator) analyzeStringsInStatement(stmt antlr.ParseTree) {
+	switch ctx := stmt.(type) {
+	case *compiler.StmtContext:
+		if ctx.Func_call() != nil {
+			t.analyzeStringsInFunctionCall(ctx.Func_call().(*compiler.FuncCallContext))
+		}
+	case *compiler.FuncCallContext:
+		t.analyzeStringsInFunctionCall(ctx)
+	}
+}
+
+// analyzeStringsInFunctionCall busca strings en llamadas a funciones
+func (t *ARM64Translator) analyzeStringsInFunctionCall(ctx *compiler.FuncCallContext) {
+	// Verificar si es print o println
+	funcName := ctx.Id_pattern().GetText()
+	if funcName == "print" || funcName == "println" {
+		if ctx.Arg_list() != nil {
+			args := ctx.Arg_list().(*compiler.ArgListContext).AllFunc_arg()
+			for _, arg := range args {
+				if argCtx := arg.(*compiler.FuncArgContext); argCtx != nil {
+					if argCtx.Expression() != nil {
+						t.analyzeStringsInExpression(argCtx.Expression())
+					}
+				}
+			}
+		}
+	}
+}
+
+// analyzeStringsInExpression busca strings en expresiones
+func (t *ARM64Translator) analyzeStringsInExpression(expr antlr.ParseTree) {
+	if expr == nil {
+		return
+	}
+
+	switch ctx := expr.(type) {
+	case *compiler.LiteralExprContext:
+		t.analyzeStringsInExpression(ctx.Literal())
+	case *compiler.LiteralContext:
+		// Buscar string literals en el literal
+		for i := 0; i < ctx.GetChildCount(); i++ {
+			child := ctx.GetChild(i)
+			if stringCtx, ok := child.(*compiler.StringLiteralContext); ok {
+				// ENCONTRAMOS UN STRING! Procesarlo en la primera pasada
+				t.preProcessStringLiteral(stringCtx)
+			}
+		}
+	case *compiler.StringLiteralContext:
+		t.preProcessStringLiteral(ctx)
+	}
+}
+
+// preProcessStringLiteral procesa strings en la primera pasada
+func (t *ARM64Translator) preProcessStringLiteral(ctx *compiler.StringLiteralContext) {
+	text := ctx.GetText()
+	if len(text) >= 2 {
+		text = text[1 : len(text)-1] // Quitar comillas
+	}
+
+	// Procesar secuencias de escape
+	text = strings.ReplaceAll(text, "\\n", "\n")
+	text = strings.ReplaceAll(text, "\\t", "\t")
+	text = strings.ReplaceAll(text, "\\\"", "\"")
+	text = strings.ReplaceAll(text, "\\\\", "\\")
+
+	// NUEVO: Verificar si ya fue procesado
+	if existingLabel, exists := t.stringRegistry[text]; exists {
+		fmt.Printf("🔄 String \"%s\" ya procesado como %s\n", text, existingLabel)
+		return
+	}
+
+	// Agregar al generador
+	stringLabel := t.generator.AddStringLiteral(text)
+
+	// NUEVO: Registrar para evitar duplicados
+	t.stringRegistry[text] = stringLabel
+
+	fmt.Printf("🔍 STRING REGISTRADO: \"%s\" -> %s\n", text, stringLabel)
 }
