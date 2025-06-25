@@ -318,12 +318,17 @@ func (t *ARM64Translator) translateStringLiteral(ctx *compiler.StringLiteralCont
 }
 
 func (t *ARM64Translator) translateBoolLiteral(ctx *compiler.BoolLiteralContext) {
-	valueStr := ctx.GetText()
-	value := 0
-	if valueStr == "true" {
-		value = 1
+	text := ctx.GetText()
+
+	switch text {
+	case "true":
+		t.generator.LoadImmediate(arm64.X0, 1)
+	case "false":
+		t.generator.LoadImmediate(arm64.X0, 0)
+	default:
+		t.addError(fmt.Sprintf("Valor booleano inválido: %s", text))
+		t.generator.LoadImmediate(arm64.X0, 0) // fallback
 	}
-	t.generator.LoadImmediate(arm64.X0, value)
 }
 
 // translateIntLiteral traduce un literal entero
