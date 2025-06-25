@@ -22,6 +22,7 @@ type ARM64Translator struct {
 	breakLabels    []string          // Etiquetas para manejar break en loops
 	continueLabels []string          // Etiquetas para manejar continue en loops
 	stringRegistry map[string]string // texto -> etiqueta Para evitar procesar strings dos veces
+	variableTypes  map[string]string // nombre -> tipo Para rastrear tipos de variables
 }
 
 // NewARM64Translator crea un nuevo traductor
@@ -33,6 +34,7 @@ func NewARM64Translator() *ARM64Translator {
 		breakLabels:    make([]string, 0),
 		continueLabels: make([]string, 0),
 		stringRegistry: make(map[string]string),
+		variableTypes:  make(map[string]string),
 	}
 }
 
@@ -43,6 +45,7 @@ func (t *ARM64Translator) TranslateProgram(tree antlr.ParseTree) (string, []stri
 	// Limpiar estado anterior
 	t.generator.Reset()
 	t.errors = make([]string, 0)
+	t.variableTypes = make(map[string]string)
 
 	fmt.Printf("🔍 === PRIMERA PASADA: ANÁLISIS DEL PROGRAMA ===\n")
 
@@ -110,6 +113,12 @@ func (t *ARM64Translator) analyzeVariablesAndStrings(node antlr.ParseTree) {
 		if !t.generator.VariableExists(varName) {
 			t.generator.DeclareVariable(varName)
 		}
+		// NUEVO: Inferir tipo de la variable
+		if ctx.Expression() != nil {
+			varType := t.inferExpressionType(ctx.Expression())
+			t.variableTypes[varName] = varType
+			fmt.Printf("🔍 Variable '%s' inferida como tipo: %s\n", varName, varType)
+		}
 		// Analizar strings en la expresión de inicialización
 		if ctx.Expression() != nil {
 			t.analyzeStringsInExpression(ctx.Expression())
@@ -120,6 +129,12 @@ func (t *ARM64Translator) analyzeVariablesAndStrings(node antlr.ParseTree) {
 		if !t.generator.VariableExists(varName) {
 			t.generator.DeclareVariable(varName)
 		}
+		// NUEVO: Inferir tipo de la variable
+		if ctx.Expression() != nil {
+			varType := t.inferExpressionType(ctx.Expression())
+			t.variableTypes[varName] = varType
+			fmt.Printf("🔍 Variable '%s' inferida como tipo: %s\n", varName, varType)
+		}
 		// Analizar strings en la expresión de inicialización
 		if ctx.Expression() != nil {
 			t.analyzeStringsInExpression(ctx.Expression())
@@ -129,6 +144,12 @@ func (t *ARM64Translator) analyzeVariablesAndStrings(node antlr.ParseTree) {
 		varName := ctx.ID().GetText()
 		if !t.generator.VariableExists(varName) {
 			t.generator.DeclareVariable(varName)
+		}
+		// NUEVO: Inferir tipo de la variable
+		if ctx.Expression() != nil {
+			varType := t.inferExpressionType(ctx.Expression())
+			t.variableTypes[varName] = varType
+			fmt.Printf("🔍 Variable '%s' inferida como tipo: %s\n", varName, varType)
 		}
 		// Analizar strings en la expresión de inicialización
 		if ctx.Expression() != nil {
@@ -220,6 +241,66 @@ func (t *ARM64Translator) analyzeVariablesAndStrings(node antlr.ParseTree) {
 			t.analyzeVariablesAndStrings(stmt)
 		}
 	}
+}
+
+// NUEVA FUNCIÓN: Inferir tipo de expresión
+func (t *ARM64Translator) inferExpressionType(expr antlr.ParseTree) string {
+	if expr == nil {
+		return "unknown"
+	}
+
+	switch ctx := expr.(type) {
+	case *compiler.LiteralExprContext:
+		return t.inferExpressionType(ctx.Literal())
+	case *compiler.LiteralContext:
+		return t.inferLiteralType(ctx)
+	case *compiler.StringLiteralContext:
+		return "string"
+	case *compiler.IntLiteralContext:
+		return "int"
+	case *compiler.FloatLiteralContext:
+		return "float"
+	case *compiler.BoolLiteralContext:
+		return "bool"
+	case *compiler.IdPatternExprContext:
+		varName := ctx.Id_pattern().GetText()
+		if varType, exists := t.variableTypes[varName]; exists {
+			return varType
+		}
+		return "unknown"
+	case *compiler.BinaryExprContext:
+		// Para operaciones binarias, usar el tipo del operando izquierdo
+		return t.inferExpressionType(ctx.GetLeft())
+	default:
+		return "unknown"
+	}
+}
+
+// Inferir tipo de literal
+func (t *ARM64Translator) inferLiteralType(ctx *compiler.LiteralContext) string {
+	text := ctx.GetText()
+
+	// Verificar string
+	if strings.HasPrefix(text, "\"") && strings.HasSuffix(text, "\"") {
+		return "string"
+	}
+
+	// Verificar float
+	if strings.Contains(text, ".") {
+		return "float"
+	}
+
+	// Verificar bool
+	if text == "true" || text == "false" {
+		return "bool"
+	}
+
+	// Por defecto, int
+	if _, err := strconv.Atoi(text); err == nil {
+		return "int"
+	}
+
+	return "unknown"
 }
 
 // === ANÁLISIS MEJORADO DE STRINGS ===
@@ -318,7 +399,7 @@ func (t *ARM64Translator) preProcessStringLiteral(ctx *compiler.StringLiteralCon
 	fmt.Printf("✅ STRING REGISTRADO: \"%s\" -> %s\n", text, stringLabel)
 }
 
-// === RESTO DE MÉTODOS (mantenidos igual) ===
+// === RESTO DE MÉTODOS (mantenidos igual pero con corrección en print) ===
 
 func (t *ARM64Translator) generateUserFunctions() {
 	t.generator.EmitRaw("")
@@ -926,7 +1007,7 @@ func (t *ARM64Translator) translateNativeFunction(ctx *compiler.FuncCallContext)
 	}
 }
 
-// translatePrintFunction traduce llamadas a print/println
+// 🔥 CORREGIR FUNCIÓN PRINT - EL PROBLEMA PRINCIPAL ESTÁ AQUÍ
 func (t *ARM64Translator) translatePrintFunction(ctx *compiler.FuncCallContext, withNewline bool) {
 	t.generator.Comment("=== FUNCIÓN PRINT ===")
 
@@ -943,25 +1024,39 @@ func (t *ARM64Translator) translatePrintFunction(ctx *compiler.FuncCallContext, 
 
 			if argCtx := arg.(*compiler.FuncArgContext); argCtx != nil {
 				if argCtx.Expression() != nil {
-					// Determinar si es string o número
+					// NUEVA LÓGICA: Usar tipo de variable o inferir tipo
 					exprText := argCtx.Expression().GetText()
 
-					if strings.HasPrefix(exprText, "\"") && strings.HasSuffix(exprText, "\"") {
-						// Es un string literal
+					// Verificar si es una variable y obtener su tipo
+					if varType := t.getArgumentType(argCtx); varType == "string" {
 						t.generator.Comment(fmt.Sprintf("Imprimiendo string: %s", exprText))
 						t.translateExpression(argCtx.Expression())
 						t.generator.CallFunction("print_string")
+					} else if strings.HasPrefix(exprText, "\"") && strings.HasSuffix(exprText, "\"") {
+						// Es un string literal directo
+						t.generator.Comment(fmt.Sprintf("Imprimiendo string literal: %s", exprText))
+						t.translateExpression(argCtx.Expression())
+						t.generator.CallFunction("print_string")
 					} else {
-						// Es una expresión numérica
+						// Es una expresión numérica o variable numérica
+						t.generator.Comment(fmt.Sprintf("Imprimiendo valor numérico: %s", exprText))
 						t.translateExpression(argCtx.Expression())
 						t.generator.CallFunction("print_integer")
 					}
 				} else if argCtx.Id_pattern() != nil {
-					// Variable - por ahora asumimos que es numérica
+					// Variable directa - determinar tipo
 					varName := argCtx.Id_pattern().GetText()
 					if t.generator.VariableExists(varName) {
 						t.generator.LoadVariable(arm64.X0, varName)
-						t.generator.CallFunction("print_integer")
+
+						// Determinar qué función usar según el tipo
+						if varType, exists := t.variableTypes[varName]; exists && varType == "string" {
+							t.generator.Comment(fmt.Sprintf("Imprimiendo variable string: %s", varName))
+							t.generator.CallFunction("print_string")
+						} else {
+							t.generator.Comment(fmt.Sprintf("Imprimiendo variable numérica: %s", varName))
+							t.generator.CallFunction("print_integer")
+						}
 					} else {
 						t.addError(fmt.Sprintf("Variable '%s' no encontrada", varName))
 					}
@@ -975,6 +1070,19 @@ func (t *ARM64Translator) translatePrintFunction(ctx *compiler.FuncCallContext, 
 		t.generator.LoadImmediate(arm64.X0, 10) // ASCII newline
 		t.generator.CallFunction("print_char")
 	}
+}
+
+// NUEVA FUNCIÓN: Determinar tipo de argumento
+func (t *ARM64Translator) getArgumentType(argCtx *compiler.FuncArgContext) string {
+	if argCtx.Expression() != nil {
+		return t.inferExpressionType(argCtx.Expression())
+	} else if argCtx.Id_pattern() != nil {
+		varName := argCtx.Id_pattern().GetText()
+		if varType, exists := t.variableTypes[varName]; exists {
+			return varType
+		}
+	}
+	return "unknown"
 }
 
 // === CONTROL DE FLUJO (simplificado) ===
