@@ -1222,9 +1222,21 @@ func (t *ARM64Translator) translatePrintBoolFunction(ctx *compiler.FuncCallConte
 	}
 }
 
+// la función translateUserFunctionCall en translator.go
 func (t *ARM64Translator) translateUserFunctionCall(callCtx *compiler.FuncCallContext, funcDecl *compiler.FuncDeclContext) {
 	funcName := callCtx.Id_pattern().GetText()
 	t.generator.Comment(fmt.Sprintf("=== LLAMADA A FUNCIÓN DE USUARIO: %s ===", funcName))
+
+	// Obtener información de parámetros de la función
+	var paramNames []string
+	if funcDecl.Param_list() != nil {
+		params := funcDecl.Param_list().(*compiler.ParamListContext).AllFunc_param()
+		for _, param := range params {
+			if paramCtx := param.(*compiler.FuncParamContext); paramCtx.ID() != nil {
+				paramNames = append(paramNames, paramCtx.ID().GetText())
+			}
+		}
+	}
 
 	// Preparar argumentos - CARGAR EN ORDEN INVERSO
 	if callCtx.Arg_list() != nil {
@@ -1244,29 +1256,55 @@ func (t *ARM64Translator) translateUserFunctionCall(callCtx *compiler.FuncCallCo
 				targetReg := fmt.Sprintf("x%d", i)
 				t.generator.Comment(fmt.Sprintf("Cargando argumento %d (%s) en %s", i, argCtx.GetText(), targetReg))
 
+				// NUEVO: Determinar el tipo del argumento que se está pasando
+				var argType string
+
 				// Evaluar el argumento
 				if argCtx.Expression() != nil {
+					// Inferir tipo de la expresión ANTES de evaluarla
+					argType = t.inferExpressionType(argCtx.Expression())
 					t.translateExpression(argCtx.Expression())
 				} else if argCtx.Id_pattern() != nil {
 					// Es una variable
 					varName := argCtx.Id_pattern().GetText()
 					if t.generator.VariableExists(varName) {
+						// Obtener tipo de la variable
+						if varType, exists := t.variableTypes[varName]; exists {
+							argType = varType
+						} else {
+							argType = "unknown"
+						}
 						t.generator.LoadVariable(arm64.X0, varName)
 					} else {
 						t.addError(fmt.Sprintf("Variable '%s' no encontrada", varName))
 						t.generator.LoadImmediate(arm64.X0, 0)
+						argType = "int"
 					}
 				} else {
 					// Fallback: intentar como texto
 					argText := argCtx.GetText()
 					if t.generator.VariableExists(argText) {
+						if varType, exists := t.variableTypes[argText]; exists {
+							argType = varType
+						} else {
+							argType = "unknown"
+						}
 						t.generator.LoadVariable(arm64.X0, argText)
 					} else if value, err := strconv.Atoi(argText); err == nil {
 						t.generator.LoadImmediate(arm64.X0, value)
+						argType = "int"
 					} else {
 						t.addError(fmt.Sprintf("No se puede procesar argumento: %s", argText))
 						t.generator.LoadImmediate(arm64.X0, 0)
+						argType = "int"
 					}
+				}
+
+				// NUEVO: Asignar tipo al parámetro correspondiente
+				if i < len(paramNames) {
+					paramName := paramNames[i]
+					t.variableTypes[paramName] = argType
+					fmt.Printf("📝 Parámetro '%s' asignado tipo: %s\n", paramName, argType)
 				}
 
 				// Mover al registro correcto (solo si no es x0)
