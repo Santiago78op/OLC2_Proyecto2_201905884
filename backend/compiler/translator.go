@@ -734,6 +734,10 @@ func (t *ARM64Translator) translateExpression(expr antlr.ParseTree) {
 		t.translateLiteral(ctx)
 	case *compiler.FuncCallExprContext:
 		t.translateNode(ctx.Func_call())
+	case *compiler.FloatLiteralContext:
+		t.translateFloatLiteral(ctx)
+	case *compiler.BoolLiteralContext:
+		t.translateBoolLiteral(ctx)
 	default:
 		t.addError(fmt.Sprintf("Expresión no implementada: %T", ctx))
 		t.generator.LoadImmediate(arm64.X0, 0)
@@ -816,17 +820,12 @@ func (t *ARM64Translator) translateStringLiteral(ctx *compiler.StringLiteralCont
 }
 
 func (t *ARM64Translator) translateBoolLiteral(ctx *compiler.BoolLiteralContext) {
-	text := ctx.GetText()
-
-	switch text {
-	case "true":
-		t.generator.LoadImmediate(arm64.X0, 1)
-	case "false":
-		t.generator.LoadImmediate(arm64.X0, 0)
-	default:
-		t.addError(fmt.Sprintf("Valor booleano inválido: %s", text))
-		t.generator.LoadImmediate(arm64.X0, 0) // fallback
+	valueStr := ctx.GetText()
+	value := 0
+	if valueStr == "true" {
+		value = 1
 	}
+	t.generator.LoadImmediate(arm64.X0, value)
 }
 
 // translateIntLiteral traduce un literal entero
