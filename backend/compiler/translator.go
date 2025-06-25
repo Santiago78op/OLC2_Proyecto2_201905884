@@ -403,19 +403,31 @@ func (t *ARM64Translator) preProcessStringLiteral(ctx *compiler.StringLiteralCon
 	text = strings.ReplaceAll(text, "\\\"", "\"")
 	text = strings.ReplaceAll(text, "\\\\", "\\")
 
-	// Verificar si ya fue procesado
-	if existingLabel, exists := t.stringRegistry[text]; exists {
-		fmt.Printf("🔄 String \"%s\" ya procesado como %s\n", text, existingLabel)
-		return
+	// VERIFICAR SI TIENE INTERPOLACIÓN
+	if strings.Contains(text, "$") {
+		// Procesar partes no variables del string interpolado
+		parts := t.parseInterpolatedString(text)
+		for _, part := range parts {
+			if !part.IsVariable && part.Content != "" {
+				// Solo registrar las partes de texto literal
+				if _, exists := t.stringRegistry[part.Content]; !exists {
+					stringLabel := t.generator.AddStringLiteral(part.Content)
+					t.stringRegistry[part.Content] = stringLabel
+					fmt.Printf("✅ STRING INTERPOLADO REGISTRADO: \"%s\" -> %s\n", part.Content, stringLabel)
+				}
+			}
+		}
+	} else {
+		// String normal - procesar como antes
+		if existingLabel, exists := t.stringRegistry[text]; exists {
+			fmt.Printf("🔄 String \"%s\" ya procesado como %s\n", text, existingLabel)
+			return
+		}
+
+		stringLabel := t.generator.AddStringLiteral(text)
+		t.stringRegistry[text] = stringLabel
+		fmt.Printf("✅ STRING REGISTRADO: \"%s\" -> %s\n", text, stringLabel)
 	}
-
-	// Agregar al generador
-	stringLabel := t.generator.AddStringLiteral(text)
-
-	// Registrar para evitar duplicados
-	t.stringRegistry[text] = stringLabel
-
-	fmt.Printf("✅ STRING REGISTRADO: \"%s\" -> %s\n", text, stringLabel)
 }
 
 // === RESTO DE MÉTODOS (mantenidos igual pero con corrección en print) ===
@@ -933,17 +945,26 @@ func (t *ARM64Translator) translateStringLiteral(ctx *compiler.StringLiteralCont
 	text = strings.ReplaceAll(text, "\\\"", "\"")
 	text = strings.ReplaceAll(text, "\\\\", "\\")
 
-	// VERIFICAR si ya fue procesado en la primera pasada
-	if existingLabel, exists := t.stringRegistry[text]; exists {
-		// Ya existe, usar la etiqueta existente
-		t.generator.Comment(fmt.Sprintf("Usar string \"%s\" con etiqueta %s", text, existingLabel))
-		t.generator.Emit(fmt.Sprintf("adr x0, %s", existingLabel))
-		return
-	}
+	// VERIFICAR SI TIENE INTERPOLACIÓN
+	if strings.Contains(text, "$") {
+		// IMPORTANTE: No usar x0 para el resultado final en interpolación
+		// porque processStringInterpolation hace múltiples prints
+		t.processStringInterpolation(text)
 
-	// Si no existe en el registro, es un error (debería haberse procesado en primera pasada)
-	t.addError(fmt.Sprintf("String \"%s\" no fue procesado en primera pasada", text))
-	t.generator.LoadImmediate(arm64.X0, 0) // Fallback
+		// DESPUÉS DE INTERPOLACIÓN, x0 queda en estado indefinido
+		// Para funciones que esperan un valor en x0, cargar 0
+		t.generator.Comment("Interpolación completada")
+
+	} else {
+		// String normal sin interpolación
+		if existingLabel, exists := t.stringRegistry[text]; exists {
+			t.generator.Comment(fmt.Sprintf("Usar string \"%s\" con etiqueta %s", text, existingLabel))
+			t.generator.Emit(fmt.Sprintf("adr x0, %s", existingLabel))
+		} else {
+			t.addError(fmt.Sprintf("String \"%s\" no fue procesado en primera pasada", text))
+			t.generator.LoadImmediate(arm64.X0, 0)
+		}
+	}
 }
 
 func (t *ARM64Translator) translateBoolLiteral(ctx *compiler.BoolLiteralContext) {
@@ -1607,6 +1628,121 @@ func (t *ARM64Translator) translateForLoop(ctx *compiler.ForStmtCondContext) {
 
 	// Etiqueta final
 	t.generator.SetLabel(endLabel)
+}
+
+// ====================================
+// Proceso de interpolacion
+// ====================================
+func (t *ARM64Translator) processStringInterpolation(text string) {
+	t.generator.Comment("=== INTERPOLACIÓN DE STRING ===")
+
+	// Dividir el string en partes: texto y variables
+	parts := t.parseInterpolatedString(text)
+
+	for _, part := range parts { // ← Quitar la variable i
+		if part.IsVariable {
+			// Es una variable - cargar y imprimir según su tipo
+			varName := part.Content
+			if t.generator.VariableExists(varName) {
+				t.generator.Comment(fmt.Sprintf("Interpolando variable: %s", varName))
+				t.generator.LoadVariable(arm64.X0, varName)
+
+				// Determinar tipo y llamar función apropiada
+				if varType, exists := t.variableTypes[varName]; exists {
+					switch varType {
+					case "bool":
+						t.generator.CallFunction("print_bool")
+					case "string":
+						t.generator.CallFunction("print_string")
+					default:
+						t.generator.CallFunction("print_integer")
+					}
+				} else {
+					t.generator.CallFunction("print_integer")
+				}
+			} else {
+				t.addError(fmt.Sprintf("Variable '%s' no encontrada en interpolación", varName))
+			}
+		} else {
+			// Es texto literal - crear string y imprimir
+			if part.Content != "" {
+				t.generator.Comment(fmt.Sprintf("Interpolando texto: \"%s\"", part.Content))
+
+				// VERIFICAR si ya existe en el registro
+				if existingLabel, exists := t.stringRegistry[part.Content]; exists {
+					t.generator.Emit(fmt.Sprintf("adr x0, %s", existingLabel))
+					t.generator.CallFunction("print_string")
+				} else {
+					// Si no existe, reportar error
+					t.addError(fmt.Sprintf("Parte interpolada \"%s\" no fue registrada en primera pasada", part.Content))
+				}
+			}
+		}
+	}
+}
+
+// Estructura para las partes del string:
+type InterpolationPart struct {
+	Content    string
+	IsVariable bool
+}
+
+func (t *ARM64Translator) parseInterpolatedString(text string) []InterpolationPart {
+	var parts []InterpolationPart
+	var currentPart strings.Builder
+
+	i := 0
+	for i < len(text) {
+		if text[i] == '$' && i+1 < len(text) {
+			// Guardar texto anterior si existe
+			if currentPart.Len() > 0 {
+				parts = append(parts, InterpolationPart{
+					Content:    currentPart.String(),
+					IsVariable: false,
+				})
+				currentPart.Reset()
+			}
+
+			// Saltar el '$'
+			i++
+
+			// Extraer nombre de variable
+			varStart := i
+			for i < len(text) && (isLetter(text[i]) || isDigit(text[i]) || text[i] == '_') {
+				i++
+			}
+
+			if i > varStart {
+				varName := text[varStart:i]
+				parts = append(parts, InterpolationPart{
+					Content:    varName,
+					IsVariable: true,
+				})
+			}
+			// i ya está en la posición correcta
+		} else {
+			currentPart.WriteByte(text[i])
+			i++
+		}
+	}
+
+	// Agregar última parte si existe
+	if currentPart.Len() > 0 {
+		parts = append(parts, InterpolationPart{
+			Content:    currentPart.String(),
+			IsVariable: false,
+		})
+	}
+
+	return parts
+}
+
+func isLetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isDigit(c byte) bool {
+	return c >= '0' && c <= '9'
 }
 
 // === LIBRERÍA ESTÁNDAR ===
