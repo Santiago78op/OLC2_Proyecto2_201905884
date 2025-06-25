@@ -4,8 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/antlr4-go/antlr/v4"
@@ -41,7 +47,23 @@ type executionResult struct {
 	HasARM64    bool     `json:"hasArm64"`    // Si se generó código ARM64
 }
 
-// función para traducir a ARM64
+// Agregar esta función para limpiar el HTML del código ARM64
+func stripHTMLFromAssembly(htmlCode string) string {
+	// Eliminar etiquetas HTML comunes
+	htmlCode = regexp.MustCompile(`<span[^>]*>`).ReplaceAllString(htmlCode, "")
+	htmlCode = regexp.MustCompile(`</span>`).ReplaceAllString(htmlCode, "")
+	htmlCode = regexp.MustCompile(`"asm-[^"]*">`).ReplaceAllString(htmlCode, "")
+
+	// Reemplazar entidades HTML comunes
+	htmlCode = strings.ReplaceAll(htmlCode, "&lt;", "<")
+	htmlCode = strings.ReplaceAll(htmlCode, "&gt;", ">")
+	htmlCode = strings.ReplaceAll(htmlCode, "&amp;", "&")
+	htmlCode = strings.ReplaceAll(htmlCode, "&quot;", "\"")
+
+	return htmlCode
+}
+
+// Función para traducir a ARM64
 func translateToARM64(tree antlr.ParseTree) (string, []string, bool) {
 	fmt.Printf("🔹 Iniciando traducción a ARM64...\n")
 
@@ -50,6 +72,25 @@ func translateToARM64(tree antlr.ParseTree) (string, []string, bool) {
 
 	// Traducir el programa
 	arm64Code, errors := translator.TranslateProgram(tree)
+
+	// Limpiar cualquier HTML del código generado
+	arm64Code = stripHTMLFromAssembly(arm64Code)
+
+	// Asegurarse de que el código esté limpio antes de enviarlo al frontend
+	if strings.Contains(arm64Code, "<span") ||
+		strings.Contains(arm64Code, "</span") ||
+		strings.Contains(arm64Code, "asm-") {
+		fmt.Println("⚠️ Se detectaron etiquetas HTML en el código, aplicando limpieza adicional...")
+		arm64Code = deepCleanAssemblyCode(arm64Code)
+	}
+
+	// Log para debugging
+	fmt.Println("🔎 Primeros 100 caracteres del código ARM64 limpio:")
+	if len(arm64Code) > 100 {
+		fmt.Println(arm64Code[:100] + "...")
+	} else {
+		fmt.Println(arm64Code)
+	}
 
 	if len(errors) > 0 {
 		fmt.Printf("❌ Errores en traducción ARM64: %d\n", len(errors))
@@ -61,6 +102,31 @@ func translateToARM64(tree antlr.ParseTree) (string, []string, bool) {
 	}
 
 	return arm64Code, errors, len(errors) == 0
+}
+
+// Función de limpieza profunda para asegurar que no hay rastros de HTML
+func deepCleanAssemblyCode(code string) string {
+	// Remover cualquier etiqueta HTML posiblemente mal formada
+	cleanCode := code
+
+	// Eliminar spans y atributos
+	cleanCode = regexp.MustCompile(`<span[^>]*>`).ReplaceAllString(cleanCode, "")
+	cleanCode = regexp.MustCompile(`</span>`).ReplaceAllString(cleanCode, "")
+
+	// Eliminar fragmentos de etiquetas incompletas como "asm-comment">
+	cleanCode = regexp.MustCompile(`"asm-[^"]*">`).ReplaceAllString(cleanCode, "")
+	cleanCode = regexp.MustCompile(`class="[^"]*"`).ReplaceAllString(cleanCode, "")
+
+	// Eliminar otros fragmentos HTML comunes
+	cleanCode = regexp.MustCompile(`</?[a-z]+[^>]*>`).ReplaceAllString(cleanCode, "")
+
+	// Reemplazar entidades HTML
+	cleanCode = strings.ReplaceAll(cleanCode, "&lt;", "<")
+	cleanCode = strings.ReplaceAll(cleanCode, "&gt;", ">")
+	cleanCode = strings.ReplaceAll(cleanCode, "&amp;", "&")
+	cleanCode = strings.ReplaceAll(cleanCode, "&quot;", "\"")
+
+	return cleanCode
 }
 
 func executeCode(w http.ResponseWriter, r *http.Request) {
@@ -237,6 +303,7 @@ func executeCode(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("🔹 Tiempo total: %v\n", reportEndTime.Sub(startTime))
 	fmt.Printf("🔹 Salida: %s\n", output)
 
+	// =========== TRADUCCIÓN A ARM64 ===========
 	var arm64Code string
 	var arm64Errors []string
 	var hasValidARM64 bool
@@ -408,6 +475,85 @@ func getARM64Code(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func executeARM64Code(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// Leer el código ARM64 del request
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Error reading request body", http.StatusBadRequest)
+		return
+	}
+
+	var requestData struct {
+		ARM64Code string `json:"arm64Code"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &requestData); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if requestData.ARM64Code == "" {
+		http.Error(w, "ARM64 code is required", http.StatusBadRequest)
+		return
+	}
+
+	// Ejecutar el código ARM64
+	output, success, errorMsg := executeARM64Assembly(requestData.ARM64Code)
+
+	// Respuesta
+	response := map[string]interface{}{
+		"success":   success,
+		"output":    output,
+		"error":     errorMsg,
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+// Función para ejecutar código ARM64
+func executeARM64Assembly(arm64Code string) (string, bool, string) {
+	// Crear archivo temporal
+	tmpDir := "/tmp"
+	sourceFile := filepath.Join(tmpDir, "temp_program.s")
+	executableFile := filepath.Join(tmpDir, "temp_program")
+
+	// Escribir código ARM64 al archivo
+	err := ioutil.WriteFile(sourceFile, []byte(arm64Code), 0644)
+	if err != nil {
+		return "", false, fmt.Sprintf("Error creating source file: %v", err)
+	}
+	defer os.Remove(sourceFile)
+
+	// Compilar con as (GNU assembler)
+	asmCmd := exec.Command("as", "-64", sourceFile, "-o", executableFile+".o")
+	asmOutput, err := asmCmd.CombinedOutput()
+	if err != nil {
+		return "", false, fmt.Sprintf("Assembly error: %s", string(asmOutput))
+	}
+	defer os.Remove(executableFile + ".o")
+
+	// Enlazar con ld
+	ldCmd := exec.Command("ld", executableFile+".o", "-o", executableFile)
+	ldOutput, err := ldCmd.CombinedOutput()
+	if err != nil {
+		return "", false, fmt.Sprintf("Linker error: %s", string(ldOutput))
+	}
+	defer os.Remove(executableFile)
+
+	// Ejecutar
+	execCmd := exec.Command(executableFile)
+	execOutput, err := execCmd.CombinedOutput()
+	if err != nil {
+		return string(execOutput), false, fmt.Sprintf("Execution error: %v", err)
+	}
+
+	return string(execOutput), true, ""
+}
+
 func main() {
 	r := mux.NewRouter()
 
@@ -417,7 +563,7 @@ func main() {
 	api.HandleFunc("/execute", executeCode).Methods("POST")
 
 	// NUEVA RUTA PARA ARM64
-	api.HandleFunc("/arm64", getARM64Code).Methods("POST")
+	api.HandleFunc("/execute-arm64", executeARM64Code).Methods("POST")
 
 	// CORS configuration
 	c := cors.New(cors.Options{

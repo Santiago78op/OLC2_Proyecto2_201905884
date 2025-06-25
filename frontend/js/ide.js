@@ -155,6 +155,15 @@ class IDEController {
 
         // Mostrar tiempo de ejecución
         document.getElementById('executionTime').textContent = `Tiempo: ${executionTime}ms`;
+
+        // Si hay código ARM64 generado exitosamente, mostrar notificación
+        if (result.hasArm64 && result.arm64Code) {
+            this.addConsoleMessage('🔧 Código ARM64 generado exitosamente', 'success');
+            this.addConsoleMessage('📊 Revisa la pestaña ARM64 en Reportes para ver el código', 'info');
+        }
+
+        // Agregar línea divisora
+        this.addConsoleDivider();
         
         // Agregar línea divisora
         this.addConsoleDivider();

@@ -7,10 +7,13 @@ import (
 
 // ARM64Generator maneja la generación de código ARM64
 type ARM64Generator struct {
-	instructions []string       // Lista de instrucciones generadas
-	labelCount   int            // Contador para etiquetas únicas
-	variables    map[string]int // Offset de variables en el stack
-	stackOffset  int            // Offset actual del stack (crece hacia abajo)
+	instructions []string          // Lista de instrucciones generadas
+	labelCount   int               // Contador para etiquetas únicas
+	variables    map[string]int    // Offset de variables en el stack
+	stackOffset  int               // Offset actual del stack (crece hacia abajo)
+	stringData   []string          // Para almacenar datos de strings
+	stringCount  int               // Contador para strings únicos
+	stringMap    map[string]string // texto -> etiqueta Elimina duplicados
 }
 
 // NewARM64Generator crea un nuevo generador
@@ -20,7 +23,33 @@ func NewARM64Generator() *ARM64Generator {
 		labelCount:   0,
 		variables:    make(map[string]int),
 		stackOffset:  0,
+		stringData:   make([]string, 0),
+		stringCount:  0,
+		stringMap:    make(map[string]string),
 	}
+}
+
+// Método para agregar strings a la sección .data
+func (g *ARM64Generator) AddStringLiteral(text string) string {
+	// NUEVO: Verificar si el string ya existe
+	if existingLabel, exists := g.stringMap[text]; exists {
+		fmt.Printf("🔄 String \"%s\" ya existe como %s, reutilizando\n", text, existingLabel)
+		return existingLabel
+	}
+
+	// Si no existe, crear nuevo
+	stringLabel := fmt.Sprintf("str_%d", g.stringCount)
+	g.stringCount++
+
+	// Agregar al mapa para evitar duplicados futuros
+	g.stringMap[text] = stringLabel
+
+	// Agregar definición del string a la lista
+	stringDef := fmt.Sprintf("%s: .asciz \"%s\"", stringLabel, text)
+	g.stringData = append(g.stringData, stringDef)
+
+	fmt.Printf("✅ Nuevo string \"%s\" creado como %s\n", text, stringLabel)
+	return stringLabel
 }
 
 // === GESTIÓN DE INSTRUCCIONES ===
@@ -180,7 +209,13 @@ func (g *ARM64Generator) CallFunction(funcName string) {
 // GenerateHeader genera el header del programa ARM64
 func (g *ARM64Generator) GenerateHeader() {
 	g.EmitRaw(".data")
-	g.EmitRaw("") // Línea vacía para claridad
+
+	// NUEVO: Agregar todos los strings a la sección .data
+	for _, stringDef := range g.stringData {
+		g.EmitRaw(stringDef)
+	}
+
+	g.EmitRaw("") // Línea vacía para separación
 	g.EmitRaw(".text")
 	g.EmitRaw(".global _start")
 	g.EmitRaw("")
@@ -223,6 +258,9 @@ func (g *ARM64Generator) Reset() {
 	g.labelCount = 0
 	g.variables = make(map[string]int)
 	g.stackOffset = 0
+	g.stringData = make([]string, 0)
+	g.stringCount = 0
+	g.stringMap = make(map[string]string) // NUEVO
 }
 
 // === UTILIDADES DE DEBUG ===
