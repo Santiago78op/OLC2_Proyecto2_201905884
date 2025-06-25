@@ -89,6 +89,9 @@ func (t *ARM64Translator) analyzeVariablesAndStrings(node antlr.ParseTree) {
 		if ctx.Decl_stmt() != nil {
 			t.analyzeVariablesAndStrings(ctx.Decl_stmt())
 		}
+		if ctx.Assign_stmt() != nil {
+			t.analyzeVariablesAndStrings(ctx.Assign_stmt())
+		}
 		if ctx.If_stmt() != nil {
 			t.analyzeVariablesAndStrings(ctx.If_stmt())
 		}
@@ -106,6 +109,22 @@ func (t *ARM64Translator) analyzeVariablesAndStrings(node antlr.ParseTree) {
 		}
 		if ctx.Func_call() != nil {
 			t.analyzeVariablesAndStrings(ctx.Func_call())
+		}
+
+	case *compiler.Assign_stmtContext:
+		// Procesar asignaciones para buscar strings
+		for i := 0; i < ctx.GetChildCount(); i++ {
+			if child := ctx.GetChild(i); child != nil {
+				if parseTreeChild, ok := child.(antlr.ParseTree); ok {
+					t.analyzeVariablesAndStrings(parseTreeChild)
+				}
+			}
+		}
+
+	case *compiler.ArgAddAssigDeclContext:
+		// Analizar expresión en asignación suma
+		if ctx.Expression() != nil {
+			t.analyzeStringsInExpression(ctx.Expression())
 		}
 
 	case *compiler.ValueDeclContext:
@@ -510,6 +529,16 @@ func (t *ARM64Translator) translateNode(node antlr.ParseTree) {
 		t.translateVarAssDecl(ctx)
 	case *compiler.AssignmentDeclContext:
 		t.translateAssignment(ctx)
+	case *compiler.Assign_stmtContext:
+		t.translateAssignStatement(ctx)
+	case *compiler.ArgAddAssigDeclContext:
+		t.translateArgAddAssignment(ctx)
+	case *compiler.FloatLiteralContext:
+		t.translateFloatLiteral(ctx)
+	case *compiler.BoolLiteralContext:
+		t.translateBoolLiteral(ctx)
+	case *compiler.UnaryExprContext: // AGREGAR ESTE CASE
+		t.translateUnaryExpression(ctx)
 	case *compiler.IfStmtContext:
 		t.translateIfStatement(ctx)
 	case *compiler.SwitchStmtContext:
@@ -547,6 +576,45 @@ func (t *ARM64Translator) translateTransferStatement(ctx *compiler.Transfer_stmt
 	} else {
 		t.addError(fmt.Sprintf("Transfer statement no reconocido: %s", text))
 	}
+}
+
+func (t *ARM64Translator) translateAssignStatement(ctx *compiler.Assign_stmtContext) {
+	// Procesar todos los hijos para encontrar el tipo específico de asignación
+	for i := 0; i < ctx.GetChildCount(); i++ {
+		child := ctx.GetChild(i)
+		switch childCtx := child.(type) {
+		case *compiler.ArgAddAssigDeclContext:
+			t.translateArgAddAssignment(childCtx)
+		case *compiler.AssignmentDeclContext:
+			t.translateAssignment(childCtx)
+		case antlr.ParseTree:
+			// Recursivamente procesar otros tipos
+			t.translateNode(childCtx)
+		}
+	}
+}
+
+func (t *ARM64Translator) translateArgAddAssignment(ctx *compiler.ArgAddAssigDeclContext) {
+	varName := ctx.Id_pattern().GetText()
+	t.generator.Comment(fmt.Sprintf("=== ASIGNACIÓN SUMA: %s += ... ===", varName))
+
+	// Verificar que la variable existe
+	if !t.generator.VariableExists(varName) {
+		t.addError(fmt.Sprintf("Variable '%s' no está declarada", varName))
+		return
+	}
+
+	// Cargar valor actual de la variable en x1
+	t.generator.LoadVariable(arm64.X1, varName)
+
+	// Evaluar la expresión del lado derecho (resultado en x0)
+	t.translateExpression(ctx.Expression())
+
+	// Sumar: x0 = x1 + x0
+	t.generator.Add(arm64.X0, arm64.X1, arm64.X0)
+
+	// Guardar el resultado de vuelta en la variable
+	t.generator.StoreVariable(arm64.X0, varName)
 }
 
 // Manejar return desde transfer_stmt
@@ -721,10 +789,16 @@ func (t *ARM64Translator) translateExpression(expr antlr.ParseTree) {
 		t.translateIntLiteral(ctx)
 	case *compiler.StringLiteralContext:
 		t.translateStringLiteral(ctx)
+	case *compiler.FloatLiteralContext:
+		t.translateFloatLiteral(ctx)
+	case *compiler.BoolLiteralContext:
+		t.translateBoolLiteral(ctx)
 	case *compiler.IdPatternExprContext:
 		t.translateVariable(ctx)
 	case *compiler.BinaryExprContext:
 		t.translateBinaryExpression(ctx)
+	case *compiler.UnaryExprContext: // AGREGAR ESTE CASE
+		t.translateUnaryExpression(ctx)
 	case *compiler.ParensExprContext:
 		t.translateExpression(ctx.Expression())
 	case *compiler.LiteralExprContext:
@@ -738,6 +812,60 @@ func (t *ARM64Translator) translateExpression(expr antlr.ParseTree) {
 		t.addError(fmt.Sprintf("Expresión no implementada: %T", ctx))
 		t.generator.LoadImmediate(arm64.X0, 0)
 	}
+}
+
+func (t *ARM64Translator) translateUnaryExpression(ctx *compiler.UnaryExprContext) {
+	// Obtener el operador (primer hijo)
+	operator := ""
+	var operandExpr antlr.ParseTree
+
+	// Buscar el operador y la expresión
+	for i := 0; i < ctx.GetChildCount(); i++ {
+		child := ctx.GetChild(i)
+		if terminal, ok := child.(antlr.TerminalNode); ok {
+			operator = terminal.GetText()
+		} else if parseTree, ok := child.(antlr.ParseTree); ok {
+			operandExpr = parseTree
+		}
+	}
+
+	t.generator.Comment(fmt.Sprintf("=== OPERADOR UNARIO: %s ===", operator))
+
+	switch operator {
+	case "!":
+		t.translateLogicalNot(operandExpr)
+	case "-":
+		t.translateUnaryMinus(operandExpr)
+	case "+":
+		// El + unario no hace nada, solo evalúa la expresión
+		t.translateExpression(operandExpr)
+	default:
+		t.addError(fmt.Sprintf("Operador unario no implementado: %s", operator))
+		t.generator.LoadImmediate(arm64.X0, 0)
+	}
+}
+
+func (t *ARM64Translator) translateLogicalNot(operandExpr antlr.ParseTree) {
+	t.generator.Comment("=== OPERADOR LÓGICO NOT (!) ===")
+
+	// Evaluar la expresión operando
+	t.translateExpression(operandExpr)
+
+	// Negar el resultado: si x0 == 0 entonces 1, sino 0
+	t.generator.Comment("Negar resultado lógico")
+	t.generator.Emit("cmp x0, #0")
+	t.generator.Emit("cset x0, eq") // x0 = 1 si x0 era 0, sino 0
+}
+
+func (t *ARM64Translator) translateUnaryMinus(operandExpr antlr.ParseTree) {
+	t.generator.Comment("=== OPERADOR UNARIO MENOS (-) ===")
+
+	// Evaluar la expresión operando
+	t.translateExpression(operandExpr)
+
+	// Negar el valor: x0 = -x0
+	t.generator.Comment("Negar valor numérico")
+	t.generator.Emit("neg x0, x0")
 }
 
 // ✅ AGREGAR ESTA FUNCIÓN:
@@ -786,8 +914,11 @@ func (t *ARM64Translator) translateFloatLiteral(ctx *compiler.FloatLiteralContex
 		t.addError(fmt.Sprintf("Error convirtiendo flotante: %s", valueStr))
 		value = 0.0
 	}
-	// Por simplicidad, convertir a entero
-	t.generator.LoadImmediate(arm64.X0, int(value))
+
+	// NUEVO: Escalar por 100 para mantener 2 decimales
+	scaledValue := int(value * 100)
+	t.generator.Comment(fmt.Sprintf("Flotante %s escalado como %d (x100)", valueStr, scaledValue))
+	t.generator.LoadImmediate(arm64.X0, scaledValue)
 }
 
 func (t *ARM64Translator) translateStringLiteral(ctx *compiler.StringLiteralContext) {
@@ -854,6 +985,20 @@ func (t *ARM64Translator) translateBinaryExpression(ctx *compiler.BinaryExprCont
 	operator := ctx.GetOp().GetText()
 	t.generator.Comment(fmt.Sprintf("=== OPERACIÓN BINARIA: %s ===", operator))
 
+	// MANEJAR OPERADORES LÓGICOS CON EVALUACIÓN PEREZOSA
+	if operator == "&&" {
+		t.translateLogicalAnd(ctx)
+		return
+	}
+	if operator == "||" {
+		t.translateLogicalOr(ctx)
+		return
+	}
+
+	// Determinar si estamos comparando flotantes
+	leftIsFloat := t.isFloatExpression(ctx.GetLeft())
+	rightIsFloat := t.isFloatExpression(ctx.GetRight())
+
 	// Evaluar operando izquierdo y guardarlo en x1
 	t.translateExpression(ctx.GetLeft())
 	t.generator.Comment("Mover operando izquierdo a x1")
@@ -861,6 +1006,19 @@ func (t *ARM64Translator) translateBinaryExpression(ctx *compiler.BinaryExprCont
 
 	// Evaluar operando derecho (queda en X0)
 	t.translateExpression(ctx.GetRight())
+
+	// Si uno de los operandos es flotante, escalar el entero
+	if leftIsFloat && !rightIsFloat {
+		// Escalar operando derecho
+		t.generator.Comment("Escalar operando derecho para comparación con flotante")
+		t.generator.Emit("mov x2, #100")
+		t.generator.Mul(arm64.X0, arm64.X0, "x2")
+	} else if !leftIsFloat && rightIsFloat {
+		// Escalar operando izquierdo
+		t.generator.Comment("Escalar operando izquierdo para comparación con flotante")
+		t.generator.Emit("mov x2, #100")
+		t.generator.Mul(arm64.X1, arm64.X1, "x2")
+	}
 
 	// Realizar la operación correspondiente
 	switch operator {
@@ -889,6 +1047,104 @@ func (t *ARM64Translator) translateBinaryExpression(ctx *compiler.BinaryExprCont
 	}
 }
 
+func (t *ARM64Translator) isFloatExpression(expr antlr.ParseTree) bool {
+	if expr == nil {
+		return false
+	}
+
+	switch ctx := expr.(type) {
+	case *compiler.FloatLiteralContext:
+		return true
+	case *compiler.LiteralExprContext:
+		return t.isFloatExpression(ctx.Literal())
+	case *compiler.LiteralContext:
+		// Verificar si contiene FloatLiteralContext
+		for i := 0; i < ctx.GetChildCount(); i++ {
+			if _, ok := ctx.GetChild(i).(*compiler.FloatLiteralContext); ok {
+				return true
+			}
+		}
+		return false
+	case *compiler.IdPatternExprContext:
+		// Verificar el tipo de la variable
+		varName := ctx.Id_pattern().GetText()
+		if varType, exists := t.variableTypes[varName]; exists {
+			return varType == "float"
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+func (t *ARM64Translator) translateLogicalAnd(ctx *compiler.BinaryExprContext) {
+	t.generator.Comment("=== OPERADOR LÓGICO AND (&&) ===")
+
+	falseLabel := t.generator.GetLabel()
+	endLabel := t.generator.GetLabel()
+
+	// Evaluar operando izquierdo
+	t.translateExpression(ctx.GetLeft())
+
+	// Si el operando izquierdo es falso (0), saltar directamente a false
+	t.generator.Comment("Si operando izquierdo es falso, resultado es falso")
+	t.generator.JumpIfZero(arm64.X0, falseLabel)
+
+	// Evaluar operando derecho (solo si el izquierdo es verdadero)
+	t.generator.Comment("Operando izquierdo es verdadero, evaluar operando derecho")
+	t.translateExpression(ctx.GetRight())
+
+	// El resultado está en x0 (verdadero si != 0, falso si == 0)
+	// Convertir a 1 o 0 explícitamente
+	t.generator.Comment("Convertir resultado a 1 o 0")
+	t.generator.Emit("cmp x0, #0")
+	t.generator.Emit("cset x0, ne") // x0 = 1 si != 0, sino 0
+	t.generator.Jump(endLabel)
+
+	// Etiqueta para resultado falso
+	t.generator.SetLabel(falseLabel)
+	t.generator.Comment("Resultado es falso")
+	t.generator.LoadImmediate(arm64.X0, 0)
+
+	// Etiqueta final
+	t.generator.SetLabel(endLabel)
+}
+
+// === NUEVA FUNCIÓN: translateLogicalOr (||) ===
+func (t *ARM64Translator) translateLogicalOr(ctx *compiler.BinaryExprContext) {
+	t.generator.Comment("=== OPERADOR LÓGICO OR (||) ===")
+
+	trueLabel := t.generator.GetLabel()
+	endLabel := t.generator.GetLabel()
+
+	// Evaluar operando izquierdo
+	t.translateExpression(ctx.GetLeft())
+
+	// Si el operando izquierdo es verdadero (!= 0), saltar directamente a true
+	t.generator.Comment("Si operando izquierdo es verdadero, resultado es verdadero")
+	t.generator.Emit("cmp x0, #0")
+	t.generator.Emit("bne " + trueLabel)
+
+	// Evaluar operando derecho (solo si el izquierdo es falso)
+	t.generator.Comment("Operando izquierdo es falso, evaluar operando derecho")
+	t.translateExpression(ctx.GetRight())
+
+	// El resultado está en x0
+	// Convertir a 1 o 0 explícitamente
+	t.generator.Comment("Convertir resultado a 1 o 0")
+	t.generator.Emit("cmp x0, #0")
+	t.generator.Emit("cset x0, ne") // x0 = 1 si != 0, sino 0
+	t.generator.Jump(endLabel)
+
+	// Etiqueta para resultado verdadero
+	t.generator.SetLabel(trueLabel)
+	t.generator.Comment("Resultado es verdadero")
+	t.generator.LoadImmediate(arm64.X0, 1)
+
+	// Etiqueta final
+	t.generator.SetLabel(endLabel)
+}
+
 // translateComparison traduce operaciones de comparación
 func (t *ARM64Translator) translateComparison(reg1, reg2, condition string) {
 	t.generator.Compare(reg1, reg2)
@@ -910,6 +1166,8 @@ func (t *ARM64Translator) translateFunctionCall(ctx *compiler.FuncCallContext) {
 		t.translatePrintFunction(ctx, false) // sin salto de línea
 	case "println":
 		t.translatePrintFunction(ctx, true) // con salto de línea
+	case "print_bool": // NUEVA FUNCIÓN
+		t.translatePrintBoolFunction(ctx)
 	case "main":
 		t.generator.Comment("=== LLAMADA A FUNCIÓN MAIN ===")
 	default:
@@ -919,6 +1177,26 @@ func (t *ARM64Translator) translateFunctionCall(ctx *compiler.FuncCallContext) {
 		} else {
 			// Manejar funciones nativas simuladas
 			t.translateNativeFunction(ctx)
+		}
+	}
+}
+
+func (t *ARM64Translator) translatePrintBoolFunction(ctx *compiler.FuncCallContext) {
+	t.generator.Comment("=== FUNCIÓN PRINT_BOOL ===")
+
+	if ctx.Arg_list() != nil {
+		args := ctx.Arg_list().(*compiler.ArgListContext).AllFunc_arg()
+		if len(args) > 0 {
+			// Tomar solo el primer argumento
+			arg := args[0]
+			if argCtx := arg.(*compiler.FuncArgContext); argCtx != nil {
+				if argCtx.Expression() != nil {
+					// Evaluar la expresión
+					t.translateExpression(argCtx.Expression())
+					// Llamar a print_bool
+					t.generator.CallFunction("print_bool")
+				}
+			}
 		}
 	}
 }
@@ -1024,24 +1302,37 @@ func (t *ARM64Translator) translatePrintFunction(ctx *compiler.FuncCallContext, 
 
 			if argCtx := arg.(*compiler.FuncArgContext); argCtx != nil {
 				if argCtx.Expression() != nil {
-					// NUEVA LÓGICA: Usar tipo de variable o inferir tipo
+					// NUEVA LÓGICA: Detectar tipo de expresión MEJORADA
 					exprText := argCtx.Expression().GetText()
 
-					// Verificar si es una variable y obtener su tipo
-					if varType := t.getArgumentType(argCtx); varType == "string" {
-						t.generator.Comment(fmt.Sprintf("Imprimiendo string: %s", exprText))
+					// VERIFICAR EXPLÍCITAMENTE SI ES BOOLEANO
+					if t.isBooleanExpression(argCtx.Expression()) {
+						// Es un booleano - usar print_bool
+						t.generator.Comment(fmt.Sprintf("Imprimiendo booleano: %s", exprText))
 						t.translateExpression(argCtx.Expression())
-						t.generator.CallFunction("print_string")
+						t.generator.CallFunction("print_bool")
 					} else if strings.HasPrefix(exprText, "\"") && strings.HasSuffix(exprText, "\"") {
 						// Es un string literal directo
 						t.generator.Comment(fmt.Sprintf("Imprimiendo string literal: %s", exprText))
 						t.translateExpression(argCtx.Expression())
 						t.generator.CallFunction("print_string")
 					} else {
-						// Es una expresión numérica o variable numérica
-						t.generator.Comment(fmt.Sprintf("Imprimiendo valor numérico: %s", exprText))
-						t.translateExpression(argCtx.Expression())
-						t.generator.CallFunction("print_integer")
+						// Verificar tipo de variable si es una variable
+						argType := t.getArgumentType(argCtx)
+						if argType == "string" {
+							t.generator.Comment(fmt.Sprintf("Imprimiendo string: %s", exprText))
+							t.translateExpression(argCtx.Expression())
+							t.generator.CallFunction("print_string")
+						} else if argType == "bool" {
+							t.generator.Comment(fmt.Sprintf("Imprimiendo variable booleana: %s", exprText))
+							t.translateExpression(argCtx.Expression())
+							t.generator.CallFunction("print_bool")
+						} else {
+							// Es una expresión numérica
+							t.generator.Comment(fmt.Sprintf("Imprimiendo valor numérico: %s", exprText))
+							t.translateExpression(argCtx.Expression())
+							t.generator.CallFunction("print_integer")
+						}
 					}
 				} else if argCtx.Id_pattern() != nil {
 					// Variable directa - determinar tipo
@@ -1050,11 +1341,20 @@ func (t *ARM64Translator) translatePrintFunction(ctx *compiler.FuncCallContext, 
 						t.generator.LoadVariable(arm64.X0, varName)
 
 						// Determinar qué función usar según el tipo
-						if varType, exists := t.variableTypes[varName]; exists && varType == "string" {
-							t.generator.Comment(fmt.Sprintf("Imprimiendo variable string: %s", varName))
-							t.generator.CallFunction("print_string")
+						if varType, exists := t.variableTypes[varName]; exists {
+							switch varType {
+							case "bool":
+								t.generator.Comment(fmt.Sprintf("Imprimiendo variable booleana: %s", varName))
+								t.generator.CallFunction("print_bool")
+							case "string":
+								t.generator.Comment(fmt.Sprintf("Imprimiendo variable string: %s", varName))
+								t.generator.CallFunction("print_string")
+							default:
+								t.generator.Comment(fmt.Sprintf("Imprimiendo variable numérica: %s", varName))
+								t.generator.CallFunction("print_integer")
+							}
 						} else {
-							t.generator.Comment(fmt.Sprintf("Imprimiendo variable numérica: %s", varName))
+							t.generator.Comment(fmt.Sprintf("Imprimiendo variable (tipo desconocido): %s", varName))
 							t.generator.CallFunction("print_integer")
 						}
 					} else {
@@ -1072,9 +1372,77 @@ func (t *ARM64Translator) translatePrintFunction(ctx *compiler.FuncCallContext, 
 	}
 }
 
-// NUEVA FUNCIÓN: Determinar tipo de argumento
+func (t *ARM64Translator) isBooleanExpression(expr antlr.ParseTree) bool {
+	if expr == nil {
+		return false
+	}
+
+	switch ctx := expr.(type) {
+	case *compiler.BoolLiteralContext:
+		return true
+	case *compiler.LiteralExprContext:
+		return t.isBooleanExpression(ctx.Literal())
+	case *compiler.LiteralContext:
+		// Verificar si contiene BoolLiteralContext
+		for i := 0; i < ctx.GetChildCount(); i++ {
+			if _, ok := ctx.GetChild(i).(*compiler.BoolLiteralContext); ok {
+				return true
+			}
+		}
+		// AGREGAR: También verificar por texto específico
+		text := ctx.GetText()
+		if text == "true" || text == "false" {
+			return true
+		}
+		return false
+	case *compiler.BinaryExprContext:
+		// Operaciones de comparación devuelven booleanos
+		operator := ctx.GetOp().GetText()
+		switch operator {
+		case "==", "!=", "<", ">", "<=", ">=", "&&", "||":
+			return true
+		}
+		return false
+	case *compiler.UnaryExprContext:
+		// El operador ! devuelve booleano
+		for i := 0; i < ctx.GetChildCount(); i++ {
+			if terminal, ok := ctx.GetChild(i).(antlr.TerminalNode); ok {
+				if terminal.GetText() == "!" {
+					return true
+				}
+			}
+		}
+		return false
+	case *compiler.IdPatternExprContext:
+		// Verificar el tipo de la variable
+		varName := ctx.Id_pattern().GetText()
+		if varType, exists := t.variableTypes[varName]; exists {
+			return varType == "bool"
+		}
+		return false
+	default:
+		// CASO ESPECIAL: Si el texto completo es "true" o "false"
+		text := expr.GetText()
+		return text == "true" || text == "false"
+	}
+}
+
+// Determinar tipo de argumento
 func (t *ARM64Translator) getArgumentType(argCtx *compiler.FuncArgContext) string {
 	if argCtx.Expression() != nil {
+		exprText := argCtx.Expression().GetText()
+
+		// VERIFICAR EXPLÍCITAMENTE BOOLEANOS
+		if exprText == "true" || exprText == "false" {
+			return "bool"
+		}
+
+		// VERIFICAR STRINGS
+		if strings.HasPrefix(exprText, "\"") && strings.HasSuffix(exprText, "\"") {
+			return "string"
+		}
+
+		// USAR INFERENCIA DE TIPO
 		return t.inferExpressionType(argCtx.Expression())
 	} else if argCtx.Id_pattern() != nil {
 		varName := argCtx.Id_pattern().GetText()
@@ -1244,119 +1612,165 @@ func (t *ARM64Translator) translateForLoop(ctx *compiler.ForStmtCondContext) {
 // === LIBRERÍA ESTÁNDAR ===
 
 // generateStandardLibrary genera las funciones básicas necesarias
+// === FUNCIÓN generateStandardLibrary COMPLETA ===
+// REEMPLAZAR COMPLETAMENTE tu función generateStandardLibrary actual
+
 func (t *ARM64Translator) generateStandardLibrary() {
-	// Función para imprimir enteros
+	// FUNCIÓN print_integer
 	t.generator.EmitRaw(`
 print_integer:
     // Función simplificada para imprimir enteros
     // Input: x0 = número a imprimir
     stp x29, x30, [sp, #-16]!    // Guardar registros
     stp x19, x20, [sp, #-16]!
-    
+
     mov x19, x0                   // Guardar número original
-    
+
     // Manejar caso especial: cero
     cmp x19, #0
     bne convert_digits
-    
+
     // Imprimir '0'
     mov x0, #48                   // ASCII '0'
     bl print_char
     b print_done
-    
+
 convert_digits:
     // Buffer para dígitos (en el stack)
     sub sp, sp, #32
     mov x20, sp                   // x20 = puntero al buffer
     mov x21, #0                   // x21 = contador de dígitos
-    
+
     // Manejar números negativos
     cmp x19, #0
     bge positive
     mov x0, #45                   // ASCII '-'
     bl print_char
     neg x19, x19                  // Hacer positivo
-    
+
 positive:
     // Convertir dígitos
 digit_loop:
     mov x22, #10
     udiv x23, x19, x22           // x23 = x19 / 10
     msub x24, x23, x22, x19      // x24 = x19 % 10
-    
+
     add x24, x24, #48            // Convertir a ASCII
     strb w24, [x20, x21]         // Guardar dígito
     add x21, x21, #1             // Incrementar contador
-    
+
     mov x19, x23                 // x19 = quotient
     cbnz x19, digit_loop         // Continuar si no es cero
-    
+
     // Imprimir dígitos en orden inverso
 print_digits:
     sub x21, x21, #1
     ldrb w0, [x20, x21]
     bl print_char
     cbnz x21, print_digits
-    
+
     add sp, sp, #32              // Limpiar buffer
-    
+
 print_done:
     ldp x19, x20, [sp], #16      // Restaurar registros
     ldp x29, x30, [sp], #16
-    ret
+    ret`)
 
+	// FUNCIÓN print_char
+	t.generator.EmitRaw(`
 print_char:
     // Imprimir un carácter
     // Input: x0 = carácter ASCII
     stp x29, x30, [sp, #-16]!
-    
+
     // Crear buffer temporal en el stack
     sub sp, sp, #16
     strb w0, [sp]                // Guardar carácter
-    
+
     // Syscall write
     mov x0, #1                   // stdout
     mov x1, sp                   // buffer
     mov x2, #1                   // length
     mov x8, #64                  // write syscall
     svc #0
-    
+
     add sp, sp, #16              // Limpiar buffer
     ldp x29, x30, [sp], #16
     ret`)
 
+	// FUNCIÓN print_string
 	t.generator.EmitRaw(`
 print_string:
     // Función para imprimir strings
     // Input: x0 = dirección del string (terminado en null)
     stp x29, x30, [sp, #-16]!    // Guardar registros
     stp x19, x20, [sp, #-16]!
-    
+
     mov x19, x0                   // x19 = dirección del string
-    
+
     // Encontrar la longitud del string
     mov x20, #0                   // x20 = contador de longitud
-    
+
 strlen_loop:
     ldrb w1, [x19, x20]          // Cargar byte del string
     cbz w1, strlen_done          // Si es 0 (null terminator), terminar
     add x20, x20, #1             // Incrementar contador
     b strlen_loop
-    
+
 strlen_done:
     // Verificar si el string está vacío
     cbz x20, print_string_done
-    
+
     // Syscall write(1, string, length)
     mov x0, #1                   // File descriptor: stdout
     mov x1, x19                  // Buffer: dirección del string
     mov x2, x20                  // Length: longitud calculada
     mov x8, #64                  // Syscall number: write
     svc #0                       // Llamada al sistema
-    
+
 print_string_done:
     ldp x19, x20, [sp], #16      // Restaurar registros
     ldp x29, x30, [sp], #16
+    ret`)
+
+	// FUNCIÓN print_bool
+	t.generator.EmitRaw(`
+print_bool:
+    // Función para imprimir valores booleanos
+    // Input: x0 = valor booleano (0=false, cualquier otra cosa=true)
+    stp x29, x30, [sp, #-16]!    // Guardar registros
+
+    // Verificar si es true o false
+    cmp x0, #0
+    beq print_false_simple
+
+print_true_simple:
+    // Imprimir "true" manualmente
+    mov x0, #116  // 't'
+    bl print_char
+    mov x0, #114  // 'r'
+    bl print_char
+    mov x0, #117  // 'u'
+    bl print_char
+    mov x0, #101  // 'e'
+    bl print_char
+    b print_bool_simple_done
+
+print_false_simple:
+    // Imprimir "false" manualmente
+    mov x0, #102  // 'f'
+    bl print_char
+    mov x0, #97   // 'a'
+    bl print_char
+    mov x0, #108  // 'l'
+    bl print_char
+    mov x0, #115  // 's'
+    bl print_char
+    mov x0, #101  // 'e'
+    bl print_char
+
+print_bool_simple_done:
+    ldp x29, x30, [sp], #16      // Restaurar registros
     ret`)
 }
 
