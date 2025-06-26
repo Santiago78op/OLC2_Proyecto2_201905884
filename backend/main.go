@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -515,43 +516,121 @@ func executeARM64Code(w http.ResponseWriter, r *http.Request) {
 }
 
 // Función para ejecutar código ARM64
+// Función para ejecutar código ARM64 con pre-procesamiento para corregir errores comunes
 func executeARM64Assembly(arm64Code string) (string, bool, string) {
+	// PRE-PROCESAR EL CÓDIGO PARA CORREGIR ERRORES CONOCIDOS
+	arm64Code = fixARM64Code(arm64Code)
+
 	// Crear archivo temporal
 	tmpDir := "/tmp"
-	sourceFile := filepath.Join(tmpDir, "temp_program.s")
-	executableFile := filepath.Join(tmpDir, "temp_program")
+	timestamp := fmt.Sprintf("%d", time.Now().UnixNano())
+	sourceFile := filepath.Join(tmpDir, fmt.Sprintf("temp_program_%s.s", timestamp))
+	objectFile := filepath.Join(tmpDir, fmt.Sprintf("temp_program_%s.o", timestamp))
+	executableFile := filepath.Join(tmpDir, fmt.Sprintf("temp_program_%s", timestamp))
 
-	// Escribir código ARM64 al archivo
+	// Escribir código ARM64 corregido al archivo
 	err := ioutil.WriteFile(sourceFile, []byte(arm64Code), 0644)
 	if err != nil {
 		return "", false, fmt.Sprintf("Error creating source file: %v", err)
 	}
 	defer os.Remove(sourceFile)
 
-	// Compilar con as (GNU assembler)
-	asmCmd := exec.Command("as", "-64", sourceFile, "-o", executableFile+".o")
+	// Verificar que las herramientas existen
+	if _, err := exec.LookPath("aarch64-linux-gnu-as"); err != nil {
+		return "", false, "aarch64-linux-gnu-as not found. Install with: sudo apt-get install gcc-aarch64-linux-gnu"
+	}
+
+	// Compilar con aarch64-linux-gnu-as
+	asmCmd := exec.Command("aarch64-linux-gnu-as", "-o", objectFile, sourceFile)
 	asmOutput, err := asmCmd.CombinedOutput()
 	if err != nil {
 		return "", false, fmt.Sprintf("Assembly error: %s", string(asmOutput))
 	}
-	defer os.Remove(executableFile + ".o")
+	defer os.Remove(objectFile)
 
-	// Enlazar con ld
-	ldCmd := exec.Command("ld", executableFile+".o", "-o", executableFile)
+	// Enlazar con aarch64-linux-gnu-ld
+	ldCmd := exec.Command("aarch64-linux-gnu-ld", "-o", executableFile, objectFile)
 	ldOutput, err := ldCmd.CombinedOutput()
 	if err != nil {
 		return "", false, fmt.Sprintf("Linker error: %s", string(ldOutput))
 	}
 	defer os.Remove(executableFile)
 
-	// Ejecutar
-	execCmd := exec.Command(executableFile)
+	// Verificar que qemu existe
+	if _, err := exec.LookPath("qemu-aarch64"); err != nil {
+		return "", false, "qemu-aarch64 not found. Install with: sudo apt-get install qemu-user"
+	}
+
+	// Ejecutar con qemu-aarch64 con timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	execCmd := exec.CommandContext(ctx, "qemu-aarch64", "-L", "/usr/aarch64-linux-gnu", executableFile)
 	execOutput, err := execCmd.CombinedOutput()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", false, "Execution timeout (10 seconds)"
+	}
+
 	if err != nil {
-		return string(execOutput), false, fmt.Sprintf("Execution error: %v", err)
+		errorMsg := fmt.Sprintf("Execution error: %v", err)
+		if len(execOutput) > 0 {
+			errorMsg += fmt.Sprintf("\nOutput: %s", string(execOutput))
+		}
+		return string(execOutput), false, errorMsg
 	}
 
 	return string(execOutput), true, ""
+}
+
+// Función para corregir errores comunes en el código ARM64 generado
+func fixARM64Code(code string) string {
+	// 1. Corregir la llamada duplicada a print_string al final de interpolación
+	// Buscar el patrón problemático: "// Interpolación completada\n    // Llamar función print_string\n    bl print_string"
+	interpolationFix := regexp.MustCompile(`// Interpolación completada\s*\n\s*// Llamar función print_string\s*\n\s*bl print_string`)
+	code = interpolationFix.ReplaceAllString(code, "// Interpolación completada")
+
+	// 2. Corregir funciones print_integer que usan registros no preservados
+	// Buscar y reemplazar la función print_integer problemática
+	printIntegerRegex := regexp.MustCompile(`print_integer:\s*\n(.*?\n)*?\s*ret`)
+	code = printIntegerRegex.ReplaceAllString(code, `print_integer:
+    // Función mejorada para imprimir enteros
+    stp x29, x30, [sp, #-16]!    // Guardar frame pointer y link register
+    mov x29, sp                   // Setup frame pointer
+    
+    // Manejar caso especial: cero
+    cmp x0, #0
+    bne .L_not_zero
+    
+    // Imprimir '0'
+    mov x0, #48                   // ASCII '0'
+    bl print_char
+    b .L_print_int_done
+    
+.L_not_zero:
+    // Usar una implementación más simple y robusta
+    // Solo manejamos números positivos pequeños por ahora
+    cmp x0, #10
+    blt .L_single_digit
+    
+    // Para números >= 10, imprimir recursivamente
+    mov x1, x0
+    mov x2, #10
+    udiv x0, x1, x2               // x0 = x1 / 10
+    bl print_integer             // Llamada recursiva
+    
+    mov x2, #10
+    msub x0, x0, x2, x1          // x0 = x1 % 10
+    
+.L_single_digit:
+    add x0, x0, #48              // Convertir a ASCII
+    bl print_char
+    
+.L_print_int_done:
+    ldp x29, x30, [sp], #16      // Restaurar registros
+    ret`)
+
+	return code
 }
 
 func main() {
