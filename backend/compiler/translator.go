@@ -567,6 +567,13 @@ func (t *ARM64Translator) translateNode(node antlr.ParseTree) {
 		t.translateTransferStatement(ctx)
 	case *compiler.ReturnStmtContext:
 		t.translateReturnStatement(ctx)
+	case *compiler.ForAssCondContext:
+		t.translateForAssignment(ctx)
+	case *compiler.BreakStmtContext:
+		t.translateBreakStatement(ctx)
+	case *compiler.ContinueStmtContext:
+		t.translateContinueStatement(ctx)
+
 	default:
 		// Para nodos no implementados, simplemente continuar
 		t.addError(fmt.Sprintf("Nodo no implementado: %T", ctx))
@@ -820,6 +827,13 @@ func (t *ARM64Translator) translateExpression(expr antlr.ParseTree) {
 		t.translateLiteral(ctx)
 	case *compiler.FuncCallExprContext:
 		t.translateNode(ctx.Func_call())
+	case *compiler.IncredecrContext:
+		t.translateExpression(ctx.Incredecre())
+	case *compiler.IncrementoContext:
+		t.translateIncrement(ctx)
+	case *compiler.DecrementoContext:
+		t.translateDecrement(ctx)
+
 	default:
 		t.addError(fmt.Sprintf("Expresión no implementada: %T", ctx))
 		t.generator.LoadImmediate(arm64.X0, 0)
@@ -1640,12 +1654,20 @@ func (t *ARM64Translator) translateSwitchStatement(ctx *compiler.SwitchStmtConte
 	t.generator.Comment("=== FIN SWITCH ===")
 }
 
+// ====================================
+// For Loops
+// ====================================
+
 // translateForLoop traduce bucles for
 func (t *ARM64Translator) translateForLoop(ctx *compiler.ForStmtCondContext) {
 	t.generator.Comment("=== FOR LOOP ===")
 
 	startLabel := t.generator.GetLabel()
 	endLabel := t.generator.GetLabel()
+
+	// Etiquetas para break y continue
+	t.breakLabels = append(t.breakLabels, endLabel)
+	t.continueLabels = append(t.continueLabels, startLabel)
 
 	// Etiqueta de inicio del bucle
 	t.generator.SetLabel(startLabel)
@@ -1666,6 +1688,97 @@ func (t *ARM64Translator) translateForLoop(ctx *compiler.ForStmtCondContext) {
 
 	// Etiqueta final
 	t.generator.SetLabel(endLabel)
+
+	//Pop de etiquetas al salir del bucle
+	t.breakLabels = t.breakLabels[:len(t.breakLabels)-1]
+	t.continueLabels = t.continueLabels[:len(t.continueLabels)-1]
+}
+
+func (t *ARM64Translator) translateForAssignment(ctx *compiler.ForAssCondContext) {
+	t.generator.Comment("=== FOR tipo C-style ===")
+
+	// i = 1;
+	t.translateNode(ctx.Assign_stmt())
+
+	startLabel := t.generator.GetLabel()
+	continueLabel := t.generator.GetLabel()
+	endLabel := t.generator.GetLabel()
+
+	// Etiquetas para break y continue
+	t.breakLabels = append(t.breakLabels, endLabel)
+	t.continueLabels = append(t.continueLabels, startLabel)
+
+	t.generator.SetLabel(startLabel)
+
+	// Evaluar condición: i <= 5
+	t.translateExpression(ctx.Expression(0)) // condición
+	t.generator.JumpIfZero(arm64.X0, endLabel)
+
+	// Cuerpo
+	for _, stmt := range ctx.AllStmt() {
+		t.translateNode(stmt)
+	}
+
+	// Etiqueta para continue (después del cuerpo, antes del incremento)
+	t.generator.SetLabel(continueLabel)
+
+	// Incremento
+	t.translateExpression(ctx.Expression(1))
+
+	// Repetir ciclo
+	t.generator.Jump(startLabel)
+
+	t.generator.SetLabel(endLabel)
+
+	// Limpiar
+	t.breakLabels = t.breakLabels[:len(t.breakLabels)-1]
+	t.continueLabels = t.continueLabels[:len(t.continueLabels)-1]
+
+}
+
+// ====================================
+// Incremento y Decremento
+// ====================================
+func (t *ARM64Translator) translateIncrement(ctx *compiler.IncrementoContext) {
+	varName := ctx.ID().GetText()
+
+	t.generator.LoadVariable(arm64.X0, varName)
+	t.generator.Comment(fmt.Sprintf("Incrementar '%s'", varName))
+	t.generator.Emit("add x0, x0, #1")
+	t.generator.StoreVariable(arm64.X0, varName)
+}
+
+func (t *ARM64Translator) translateDecrement(ctx *compiler.DecrementoContext) {
+	varName := ctx.ID().GetText()
+
+	t.generator.LoadVariable(arm64.X0, varName)
+	t.generator.Comment(fmt.Sprintf("Decrementar '%s'", varName))
+	t.generator.Emit("sub x0, x0, #1")
+	t.generator.StoreVariable(arm64.X0, varName)
+}
+
+// ====================================
+// Transferencia de Control
+// ====================================
+
+func (t *ARM64Translator) translateBreakStatement(ctx *compiler.BreakStmtContext) {
+	if len(t.breakLabels) == 0 {
+		t.addError("Break fuera de un contexto de bucle")
+		return
+	}
+	label := t.breakLabels[len(t.breakLabels)-1]
+	t.generator.Comment("Break statement")
+	t.generator.Jump(label)
+}
+
+func (t *ARM64Translator) translateContinueStatement(ctx *compiler.ContinueStmtContext) {
+	if len(t.continueLabels) == 0 {
+		t.addError("Continue fuera de un contexto de bucle")
+		return
+	}
+	label := t.continueLabels[len(t.continueLabels)-1]
+	t.generator.Comment("Continue statement")
+	t.generator.Jump(label)
 }
 
 // ====================================
