@@ -259,6 +259,24 @@ func (t *ARM64Translator) analyzeVariablesAndStrings(node antlr.ParseTree) {
 		for _, stmt := range ctx.AllStmt() {
 			t.analyzeVariablesAndStrings(stmt)
 		}
+
+	case *compiler.SwitchStmtContext:
+		for _, rawCase := range ctx.AllSwitch_case() {
+			if caseCtx, ok := rawCase.(*compiler.SwitchCaseContext); ok {
+				t.analyzeStringsInExpression(caseCtx.Expression())
+				for _, stmt := range caseCtx.AllStmt() {
+					t.analyzeVariablesAndStrings(stmt)
+				}
+			}
+		}
+		if def := ctx.Default_case(); def != nil {
+			if defaultCtx, ok := def.(*compiler.DefaultCaseContext); ok {
+				for _, stmt := range defaultCtx.AllStmt() {
+					t.analyzeVariablesAndStrings(stmt)
+				}
+			}
+		}
+
 	}
 }
 
