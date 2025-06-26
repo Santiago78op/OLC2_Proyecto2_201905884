@@ -154,6 +154,13 @@ func (g *ARM64Generator) Div(result, reg1, reg2 string) {
 	g.Emit(fmt.Sprintf("sdiv %s, %s, %s", result, reg1, reg2))
 }
 
+// Mod módulo de dos registros: result = reg1 % reg2
+func (g *ARM64Generator) Mod(result, reg1, reg2 string) {
+	g.Comment(fmt.Sprintf("Módulo: %s = %s %% %s", result, reg1, reg2))
+	g.Emit(fmt.Sprintf("sdiv x3, %s, %s", reg1, reg2))             // División entera
+	g.Emit(fmt.Sprintf("msub %s, x3, %s, %s", result, reg2, reg1)) // x1 - x3*x2
+}
+
 // === OPERACIONES DE COMPARACIÓN ===
 
 // Compare compara dos registros
