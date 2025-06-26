@@ -1065,6 +1065,8 @@ func (t *ARM64Translator) translateBinaryExpression(ctx *compiler.BinaryExprCont
 		t.generator.Mul(arm64.X0, arm64.X1, arm64.X0)
 	case "/":
 		t.generator.Div(arm64.X0, arm64.X1, arm64.X0)
+	case "%":
+		t.generator.Mod(arm64.X0, arm64.X1, arm64.X0)
 	case "==":
 		t.translateComparison(arm64.X1, arm64.X0, "eq")
 	case "!=":
@@ -1706,7 +1708,7 @@ func (t *ARM64Translator) translateForAssignment(ctx *compiler.ForAssCondContext
 
 	// Etiquetas para break y continue
 	t.breakLabels = append(t.breakLabels, endLabel)
-	t.continueLabels = append(t.continueLabels, startLabel)
+	t.continueLabels = append(t.continueLabels, continueLabel)
 
 	t.generator.SetLabel(startLabel)
 
@@ -1719,7 +1721,7 @@ func (t *ARM64Translator) translateForAssignment(ctx *compiler.ForAssCondContext
 		t.translateNode(stmt)
 	}
 
-	// Etiqueta para continue (después del cuerpo, antes del incremento)
+	// Etiqueta para continue
 	t.generator.SetLabel(continueLabel)
 
 	// Incremento
