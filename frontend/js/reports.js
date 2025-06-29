@@ -5,10 +5,12 @@ class ReportsManager {
             symbols: [],
             ast: null
         };
-        this.sortOrder = {}; // Para mantener el estado de ordenamiento
+        this.sortOrder = {};
         this.astZoom = 1;
         this.astSvg = null;
         this.astData = null;
+        this.arm64Highlighter = null;
+        this.rawARM64Code = null; // NUEVA LÍNEA - para código sin HTML
         this.init();
     }
 
@@ -28,7 +30,7 @@ class ReportsManager {
             this.hideReportsModal();
         });
 
-        // Cerrar modal al hacer click fuera
+        // Cerrar modal al hacer click updateARM64Visualizationuera
         document.getElementById('reportsModal').addEventListener('click', (e) => {
             if (e.target.id === 'reportsModal') {
                 this.hideReportsModal();
@@ -84,6 +86,19 @@ class ReportsManager {
         });
         document.getElementById('downloadASTJsonBtn').addEventListener('click', () => {
             this.downloadAST('json');
+        });
+
+        // Botones de ARM64
+        document.getElementById('downloadARM64Btn').addEventListener('click', () => {
+            this.downloadARM64Code();
+        });
+
+        document.getElementById('executeARM64Btn').addEventListener('click', () => {
+            this.executeARM64Code();
+        });
+
+        document.getElementById('clearARM64OutputBtn').addEventListener('click', () => {
+            this.clearARM64Output();
         });
 
         // Teclas de escape para cerrar modal
@@ -162,6 +177,11 @@ class ReportsManager {
         if (tabName === 'ast' && this.currentReports.ast) {
             setTimeout(() => this.renderAST(), 100);
         }
+        
+        // NUEVAS LÍNEAS ARM64:
+        if (tabName === 'arm64') {
+            setTimeout(() => this.updateARM64Visualization(), 100);
+        }
     }
 
     updateReports(data) {
@@ -171,13 +191,18 @@ class ReportsManager {
         this.currentReports = {
             errors: data.errors || [],
             symbols: data.symbols || data.symbolTable || [],
-            ast: data.ast || data.cstSvg || null
+            ast: data.ast || data.cstSvg || null,
+            // NUEVAS LÍNEAS ARM64:
+            arm64Code: data.arm64Code || null,
+            arm64Errors: data.arm64Errors || [],
+            hasARM64: data.hasArm64 || false
         };
 
         console.log('📊 Reportes actualizados:', {
             errores: this.currentReports.errors.length,
             símbolos: this.currentReports.symbols.length,
-            tieneAST: !!this.currentReports.ast
+            tieneAST: !!this.currentReports.ast,
+            tieneARM64: !!this.currentReports.arm64Code
         });
 
         // Si el modal está abierto, actualizar
@@ -185,13 +210,12 @@ class ReportsManager {
             this.updateAllReports();
         }
     }
-
     updateAllReports() {
         this.updateErrorsTable();
         this.updateSymbolsTable();
         this.updateASTVisualization();
+        this.updateARM64Visualization(); // NUEVA LÍNEA
     }
-
     // ==================== ERRORES ====================
     updateErrorsTable() {
         const tbody = document.getElementById('errorsTableBody');
@@ -1078,6 +1102,183 @@ class ReportsManager {
     getErrorCount() {
         return this.currentReports.errors.length;
     }
+
+    // Metodos de arm64:
+    updateARM64Visualization() {
+        const container = document.getElementById('arm64Visualization');
+        const executionPanel = document.getElementById('arm64ExecutionPanel');
+        
+        if (!this.currentReports.arm64Code || this.currentReports.arm64Errors?.length > 0) {
+            container.innerHTML = `
+                <div class="empty-arm64">
+                    <div class="empty-arm64-icon">🔧</div>
+                    <p>No hay código ARM64 disponible</p>
+                    <small>${this.currentReports.arm64Errors?.length > 0 ? 
+                        'Errores en la generación: ' + this.currentReports.arm64Errors.join(', ') : 
+                        'Ejecuta código VLan Cherry sin errores para generar ARM64'}</small>
+                </div>
+            `;
+            executionPanel.style.display = 'none';
+            return;
+        }
+
+        // LIMPIAR TODO EL HTML CORRUPTO DEL BACKEND
+        let cleanCode = this.currentReports.arm64Code
+            .replace(/"asm-[^"]*">/g, '')           // Remover cualquier "asm-X">
+            .replace(/<span[^>]*>/g, '')            // Remover <span>
+            .replace(/<\/span>/g, '')               // Remover </span>
+            .replace(/&lt;/g, '<')                  // Decodificar HTML entities
+            .replace(/&gt;/g, '>')
+            .replace(/&amp;/g, '&')
+            .replace(/&quot;/g, '"');
+
+        // GUARDAR EL CÓDIGO COMPLETAMENTE LIMPIO
+        this.rawARM64Code = cleanCode;
+        
+        console.log('🔧 Código ARM64 LIMPIO guardado:', this.rawARM64Code);
+
+        // Initialize highlighter
+        if (!this.arm64Highlighter) {
+            this.arm64Highlighter = new ARM64SyntaxHighlighter();
+        }
+
+        // APLICAR HIGHLIGHTING AL CÓDIGO LIMPIO
+        const highlightedCode = this.arm64Highlighter.highlight(cleanCode);
+        
+        // Split into lines for numbering
+        const lines = cleanCode.split('\n');
+        
+        // Generate line numbers
+        const lineNumbers = lines.map((_, index) => 
+            `<div>${(index + 1).toString().padStart(3, ' ')}</div>`
+        ).join('');
+        
+        // Generate highlighted lines
+        const highlightedLines = highlightedCode.split('\n').map(line => 
+            `<div>${line || '&nbsp;'}</div>`
+        ).join('');
+        
+        container.innerHTML = `
+            <div class="arm64-code-with-lines">
+                <div class="arm64-line-numbers">${lineNumbers}</div>
+                <div class="arm64-code-content">
+                    <div class="arm64-code">${highlightedLines}</div>
+                </div>
+            </div>
+        `;
+        
+        executionPanel.style.display = 'flex';
+        
+        console.log('✅ ARM64 con highlighting aplicado correctamente');
+    }
+
+    // Agregar este método nuevo también:
+    addInstructionTooltips(container) {
+        const instructions = container.querySelectorAll('.asm-instruction, .asm-branch');
+        
+        instructions.forEach(instruction => {
+            instruction.addEventListener('mouseenter', (e) => {
+                const info = this.arm64Highlighter.getInstructionInfo(e.target.textContent);
+                instruction.title = info;
+            });
+        });
+    }
+
+    executeARM64Code() {
+        // Use RAW code without HTML tags
+        if (!this.rawARM64Code) {
+            alert('No hay código ARM64 para ejecutar');
+            return;
+        }
+
+        const executeBtn = document.getElementById('executeARM64Btn');
+        const outputContainer = document.getElementById('arm64ExecutionOutput');
+        
+        executeBtn.disabled = true;
+        executeBtn.textContent = '⏳ Ejecutando...';
+        
+        console.log('🔧 Ejecutando código ARM64 (RAW):', this.rawARM64Code);
+        
+        // Llamar al backend para ejecutar el código ARM64 RAW
+        this.executeARM64OnBackend(this.rawARM64Code)
+            .then(result => {
+                this.displayARM64Output(result);
+            })
+            .catch(error => {
+                this.displayARM64Output({
+                    success: false,
+                    error: error.message || 'Error ejecutando código ARM64'
+                });
+            })
+            .finally(() => {
+                executeBtn.disabled = false;
+                executeBtn.textContent = '▶️ Ejecutar ARM64';
+            });
+    }
+
+    // Nuevo método para ejecutar en el backend:
+    async executeARM64OnBackend(arm64Code) {
+        try {
+            const response = await fetch('http://localhost:8080/api/execute-arm64', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    arm64Code: arm64Code
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error ejecutando ARM64 en backend:', error);
+            throw error;
+        }
+    }
+
+    displayARM64Output(result) {
+        const outputContainer = document.getElementById('arm64ExecutionOutput');
+        
+        if (result.success) {
+            outputContainer.innerHTML = `
+                <div class="arm64-success">
+                    <strong>✅ Ejecución exitosa</strong><br>
+                    <pre>${this.escapeHtml(result.output)}</pre>
+                </div>
+            `;
+        } else {
+            outputContainer.innerHTML = `
+                <div class="arm64-error">
+                    <strong>❌ Error en ejecución</strong><br>
+                    <pre>${this.escapeHtml(result.error)}</pre>
+                </div>
+            `;
+        }
+    }
+
+    downloadARM64Code() {
+        if (!this.rawARM64Code) {
+            alert('No hay código ARM64 para descargar');
+            return;
+        }
+
+        const blob = new Blob([this.rawARM64Code], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'programa.s';
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    clearARM64Output() {
+        document.getElementById('arm64ExecutionOutput').innerHTML = '';
+    }
+
 }
 
 // ========================================

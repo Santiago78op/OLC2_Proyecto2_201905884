@@ -148,6 +148,7 @@
                 <button class="modal-tab active" data-tab="errors">❌ Errores</button>
                 <button class="modal-tab" data-tab="symbols">🔤 Tabla de Símbolos</button>
                 <button class="modal-tab" data-tab="ast">🌳 AST</button>
+                <button class="modal-tab" data-tab="arm64">🔧 ARM64</button>
             </div>
 
             <div class="modal-content">
@@ -241,6 +242,37 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- ARM64 Tab -->
+                <div class="modal-tab-content" id="arm64Tab">
+                    <div class="report-header">
+                        <h3>Código ARM64 Generado</h3>
+                        <div class="report-controls">
+                            <div class="download-controls">
+                                <button class="download-btn" id="downloadARM64Btn">📥 Descargar .s</button>
+                                <button class="arm64-execute-btn" id="executeARM64Btn">▶️ Ejecutar ARM64</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="arm64-container">
+                        <div id="arm64Visualization" class="arm64-code-wrapper">
+                            <div class="empty-arm64">
+                                <div class="empty-arm64-icon">🔧</div>
+                                <p>No hay código ARM64 generado</p>
+                                <small>Ejecuta código VLan Cherry sin errores para generar ARM64</small>
+                            </div>
+                        </div>
+                        <div class="arm64-execution-panel" id="arm64ExecutionPanel" style="display: none;">
+                            <div class="arm64-execution-header">
+                                <h4>Salida de Ejecución ARM64</h4>
+                                <button class="panel-btn" id="clearARM64OutputBtn" title="Limpiar salida">🗑️</button>
+                            </div>
+                            <div class="arm64-execution-output" id="arm64ExecutionOutput">
+                                <!-- La salida aparecerá aquí -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -267,5 +299,6 @@
 <script src="js/file-manager.js"></script>
 <script src="js/reports.js"></script>
 <script src="js/ide.js"></script>
+<script src="js/arm64-highlighter.js"></script>
 </body>
 </html>
