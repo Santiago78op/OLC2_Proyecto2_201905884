@@ -1381,6 +1381,8 @@ func (t *ARM64Translator) translateNativeFunction(ctx *compiler.FuncCallContext)
 	case "TypeOf", "Type":
 		// Simular TypeOf - retornar código que representa tipo
 		t.generator.LoadImmediate(arm64.X0, 1) // 1=int, 2=float, etc.
+	case "indexOf":
+		t.translateIndexOfFunction(ctx)
 	default:
 		t.addError(fmt.Sprintf("Función no implementada: %s", funcName))
 		t.generator.LoadImmediate(arm64.X0, 0)
@@ -2460,4 +2462,140 @@ func (t *ARM64Translator) translateVectorAssignment(ctx *compiler.VectorAssignCo
 	t.generator.Emit("str x2, [x0, x1, lsl #3]") // vector[índice + 1] = valor
 
 	t.generator.Comment(fmt.Sprintf("Vector '%s' modificado exitosamente", vectorName))
+}
+
+// translateIndexOfFunction maneja la traducción de la función indexOf para vectores
+func (t *ARM64Translator) translateIndexOfFunction(ctx *compiler.FuncCallContext) {
+	t.generator.Comment("=== FUNCIÓN indexOf ===")
+
+	// Verificar que tenemos exactamente 2 argumentos
+	if ctx.Arg_list() == nil {
+		t.addError("indexOf requiere exactamente 2 argumentos")
+		t.generator.LoadImmediate(arm64.X0, -1)
+		return
+	}
+
+	argList, ok := ctx.Arg_list().(*compiler.ArgListContext)
+	if !ok {
+		t.addError("indexOf: no se pudo obtener la lista de argumentos")
+		t.generator.LoadImmediate(arm64.X0, -1)
+		return
+	}
+
+	args := argList.AllFunc_arg()
+	if len(args) != 2 {
+		t.addError(fmt.Sprintf("indexOf requiere exactamente 2 argumentos, se proporcionaron %d", len(args)))
+		t.generator.LoadImmediate(arm64.X0, -1)
+		return
+	}
+
+	// Primer argumento: el vector
+	vectorArg, ok := args[0].(*compiler.FuncArgContext)
+	if !ok {
+		t.addError("indexOf: primer argumento no válido")
+		t.generator.LoadImmediate(arm64.X0, -1)
+		return
+	}
+
+	// Segundo argumento: el elemento a buscar
+	elementArg, ok := args[1].(*compiler.FuncArgContext)
+	if !ok {
+		t.addError("indexOf: segundo argumento no válido")
+		t.generator.LoadImmediate(arm64.X0, -1)
+		return
+	}
+	// Verificar que las expresiones no sean nil
+	if elementArg.Expression() == nil && elementArg.Id_pattern() == nil {
+		t.addError("indexOf: segundo argumento no tiene expresión ni identificador válido")
+		t.generator.LoadImmediate(arm64.X0, -1)
+		return
+	}
+
+	if vectorArg.Expression() == nil && vectorArg.Id_pattern() == nil {
+		t.addError("indexOf: primer argumento no tiene expresión ni identificador válido")
+		t.generator.LoadImmediate(arm64.X0, -1)
+		return
+	}
+
+	// Evaluar el elemento a buscar y guardarlo en X1
+	t.generator.Comment("Evaluar elemento a buscar")
+	if elementArg.Expression() != nil {
+		t.translateExpression(elementArg.Expression())
+	} else if elementArg.Id_pattern() != nil {
+		// Manejar identificador (variable)
+		varName := elementArg.Id_pattern().GetText()
+		if t.generator.VariableExists(varName) {
+			t.generator.LoadVariable(arm64.X0, varName)
+		} else {
+			t.addError(fmt.Sprintf("Variable '%s' no encontrada", varName))
+			t.generator.LoadImmediate(arm64.X0, 0)
+		}
+	}
+	t.generator.Emit("mov x1, x0") // X1 = elemento a buscar
+
+	// Evaluar el vector y obtener su dirección en X0
+	t.generator.Comment("Evaluar vector")
+	if vectorArg.Expression() != nil {
+		t.translateExpression(vectorArg.Expression())
+	} else if vectorArg.Id_pattern() != nil {
+		// Manejar identificador (variable)
+		varName := vectorArg.Id_pattern().GetText()
+		if t.generator.VariableExists(varName) {
+			t.generator.LoadVariable(arm64.X0, varName)
+		} else {
+			t.addError(fmt.Sprintf("Variable '%s' no encontrada", varName))
+			t.generator.LoadImmediate(arm64.X0, 0)
+		}
+	}
+	t.generator.Emit("mov x2, x0") // X2 = dirección del vector
+
+	// Cargar la longitud del vector (primer elemento)
+	t.generator.Comment("Cargar longitud del vector")
+	t.generator.Emit("ldr x3, [x2]") // X3 = longitud del vector
+
+	// Inicializar índice de búsqueda
+	t.generator.Comment("Inicializar índice de búsqueda")
+	t.generator.Emit("mov x4, #0") // X4 = índice actual
+
+	// Crear etiquetas para los loops
+	loopLabel := t.generator.GetLabel()
+	foundLabel := t.generator.GetLabel()
+	notFoundLabel := t.generator.GetLabel()
+	endLabel := t.generator.GetLabel()
+
+	// Loop principal
+	t.generator.SetLabel(loopLabel)
+	t.generator.Comment("Verificar si hemos llegado al final del vector")
+	t.generator.Emit("cmp x4, x3")
+	t.generator.Emit("bge " + notFoundLabel)
+
+	// Cargar elemento actual del vector (saltando el primer elemento que es la longitud)
+	t.generator.Comment("Cargar elemento actual del vector")
+	t.generator.Emit("add x5, x4, #1")           // X5 = índice + 1 (saltar longitud)
+	t.generator.Emit("ldr x6, [x2, x5, lsl #3]") // X6 = vector[índice + 1]
+
+	// Comparar elemento actual con elemento buscado
+	t.generator.Comment("Comparar elemento actual con elemento buscado")
+	t.generator.Emit("cmp x6, x1")
+	t.generator.Emit("beq " + foundLabel)
+
+	// Incrementar índice y continuar
+	t.generator.Comment("Incrementar índice y continuar")
+	t.generator.Emit("add x4, x4, #1")
+	t.generator.Emit("b " + loopLabel)
+
+	// Elemento encontrado - devolver índice
+	t.generator.SetLabel(foundLabel)
+	t.generator.Comment("Elemento encontrado - devolver índice")
+	t.generator.Emit("mov x0, x4")
+	t.generator.Emit("b " + endLabel)
+
+	// Elemento no encontrado - devolver -1
+	t.generator.SetLabel(notFoundLabel)
+	t.generator.Comment("Elemento no encontrado - devolver -1")
+	t.generator.LoadImmediate(arm64.X0, -1)
+
+	// Fin de la función
+	t.generator.SetLabel(endLabel)
+	t.generator.Comment("=== FIN indexOf ===")
 }
