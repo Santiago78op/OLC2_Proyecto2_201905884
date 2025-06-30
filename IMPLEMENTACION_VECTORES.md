@@ -235,3 +235,147 @@ print_vector:
 - ✅ **Detección automática de tipos:** `[]int` detectado correctamente
 - ✅ **Impresión formateada:** `[ 1 2 3 4 5 ]`
 - ✅ **ARM64 optimizado:** Función `print_vector` eficiente
+
+## Fase 3: Soporte para Acceso por Índices a Vectores (NEW)
+
+### Problema Detectado
+Después de completar el soporte para declaración e impresión de vectores, se identificó que faltaba implementar el acceso por índices (`numeros[0]`). El error específico era:
+
+```
+Expresión no implementada: *compiler.VectorItemExprContext
+```
+
+Esto indicaba que faltaba el case para manejar acceso por índices en la función `translateExpression`.
+
+### Solución Implementada
+
+#### 1. Agregado Case en `translateExpression`
+**Archivo:** `backend/compiler/translator.go`
+**Función:** `translateExpression` - línea ~1228
+
+```go
+// Agregado nuevo case para acceso a vectores
+case *compiler.VectorItemExprContext:
+    t.translateVectorAccess(ctx)
+```
+
+#### 2. Implementación de `translateVectorAccess`
+**Archivo:** `backend/compiler/translator.go`
+**Líneas:** ~2287-2350
+
+Nueva función que maneja el acceso por índices a vectores:
+
+```go
+func (t *ARM64Translator) translateVectorAccess(ctx *compiler.VectorItemExprContext) {
+    t.generator.Comment("=== ACCESO A VECTOR ===")
+
+    // Buscar VectorItemContext hijo
+    var vectorItemCtx *compiler.VectorItemContext
+    for i := 0; i < ctx.GetChildCount(); i++ {
+        if child, ok := ctx.GetChild(i).(*compiler.VectorItemContext); ok {
+            vectorItemCtx = child
+            break
+        }
+    }
+
+    // Extraer nombre del vector y expresión del índice
+    var vectorName string
+    var indexExpr antlr.ParseTree
+
+    for i := 0; i < vectorItemCtx.GetChildCount(); i++ {
+        child := vectorItemCtx.GetChild(i)
+
+        if idPattern, ok := child.(*compiler.IdPatternContext); ok {
+            vectorName = idPattern.GetText()
+        } else if parseTree, ok := child.(antlr.ParseTree); ok {
+            indexExpr = parseTree // Expresión del índice
+        }
+    }
+
+    // Validaciones
+    if vectorName == "" || indexExpr == nil {
+        t.addError("Error al parsear acceso a vector")
+        t.generator.LoadImmediate(arm64.X0, 0)
+        return
+    }
+
+    // Verificar que el vector existe
+    if !t.generator.VariableExists(vectorName) {
+        t.addError(fmt.Sprintf("Vector '%s' no encontrado", vectorName))
+        t.generator.LoadImmediate(arm64.X0, 0)
+        return
+    }
+
+    // Evaluar índice y cargar vector
+    t.translateExpression(indexExpr)           // X0 = índice
+    t.generator.Emit("mov x1, x0")            // X1 = índice
+    t.generator.LoadVariable(arm64.X0, vectorName) // X0 = dirección del vector
+
+    // Saltar longitud (primer elemento) y acceder al elemento
+    t.generator.Comment("Saltar longitud del vector (primer elemento)")
+    t.generator.Emit("add x1, x1, #1")        // X1 = índice + 1
+    t.generator.Comment("Cargar elemento del vector")
+    t.generator.Emit("ldr x0, [x0, x1, lsl #3]") // X0 = vector[índice + 1]
+}
+```
+
+#### 3. Lógica de Acceso ARM64
+
+La función genera código ARM64 que:
+1. **Evalúa el índice:** Traduce la expresión del índice (ej: `0`, `i`, `x+1`)
+2. **Carga la dirección del vector:** Obtiene la dirección base del vector
+3. **Ajusta por metadata:** Suma 1 al índice para saltar la longitud almacenada
+4. **Calcula offset:** Multiplica por 8 bytes (`lsl #3`) para direccionamiento de 64-bit
+5. **Carga el elemento:** Accede al elemento correcto del vector
+
+### Código ARM64 Generado
+
+Para `numeros[0]` se genera:
+
+```arm64
+// === ACCESO A VECTOR ===
+// Accediendo a vector 'numeros'
+mov x0, #0                    // Evaluar índice (literal 0)
+mov x1, x0                    // X1 = índice
+ldr x0, [sp, #8]             // Cargar dirección del vector
+// Saltar longitud del vector (primer elemento)
+add x1, x1, #1               // X1 = índice + 1 (0 + 1 = 1)
+// Cargar elemento del vector
+ldr x0, [x0, x1, lsl #3]     // X0 = vector[1] = primer elemento real
+```
+
+### Estructura de Memoria del Vector
+
+```
+vec_numeros: .quad 5, 1, 2, 3, 4, 5
+                   ↑  ↑  ↑  ↑  ↑  ↑
+               longitud [0][1][2][3][4]
+```
+
+- `numeros[0]` accede al segundo elemento (.quad position 1) = `1`
+- `numeros[1]` accede al tercer elemento (.quad position 2) = `2`
+- Y así sucesivamente...
+
+### Resultado Esperado
+
+Para el código:
+```vlang
+numeros = []int{1, 2, 3, 4, 5}
+print("Primer elemento:", numeros[0])
+print("Segundo elemento:", numeros[1])
+```
+
+Se espera la salida:
+```
+Primer elemento: 1
+Segundo elemento: 2
+```
+
+### Estado de Implementación - Fase 3
+- ✅ **Caso agregado en translateExpression**
+- ✅ **Función translateVectorAccess implementada**
+- ✅ **Extracción de nombre de vector y índice**
+- ✅ **Validación de existencia de vector**
+- ✅ **Evaluación de expresiones de índice**
+- ✅ **Generación de código ARM64 para acceso**
+- ✅ **Manejo de offset por metadata de longitud**

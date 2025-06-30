@@ -856,6 +856,8 @@ func (t *ARM64Translator) translateExpression(expr antlr.ParseTree) {
 		t.translateIncrement(ctx)
 	case *compiler.DecrementoContext:
 		t.translateDecrement(ctx)
+	case *compiler.VectorItemExprContext:
+		t.translateVectorAccess(ctx)
 
 	default:
 		t.addError(fmt.Sprintf("Expresión no implementada: %T", ctx))
@@ -2278,4 +2280,84 @@ func (t *ARM64Translator) extractIntFromExpression(expr antlr.ParseTree) int {
 
 	// Valor especial para indicar que no se pudo extraer un entero
 	return -999999
+}
+
+// translateVectorAccess traduce acceso a elementos de vectores: vector[index]
+func (t *ARM64Translator) translateVectorAccess(ctx *compiler.VectorItemExprContext) {
+	t.generator.Comment("=== ACCESO A VECTOR ===")
+
+	// Para VectorItemExprContext, necesitamos buscar el VectorItemContext hijo
+	var vectorItemCtx *compiler.VectorItemContext
+	for i := 0; i < ctx.GetChildCount(); i++ {
+		if child, ok := ctx.GetChild(i).(*compiler.VectorItemContext); ok {
+			vectorItemCtx = child
+			break
+		}
+	}
+
+	if vectorItemCtx == nil {
+		t.addError("No se encontró VectorItemContext")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	// Obtener el nombre del vector y el índice
+	var vectorName string
+	var indexExpr antlr.ParseTree
+
+	for i := 0; i < vectorItemCtx.GetChildCount(); i++ {
+		child := vectorItemCtx.GetChild(i)
+
+		if idPattern, ok := child.(*compiler.IdPatternContext); ok {
+			vectorName = idPattern.GetText()
+		} else if _, ok := child.(antlr.TerminalNode); ok {
+			// Saltar '[' y ']'
+			continue
+		} else if parseTree, ok := child.(antlr.ParseTree); ok {
+			// Es la expresión del índice
+			indexExpr = parseTree
+		}
+	}
+
+	if vectorName == "" {
+		t.addError("No se pudo determinar el nombre del vector")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	if indexExpr == nil {
+		t.addError("No se pudo determinar el índice del vector")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	t.generator.Comment(fmt.Sprintf("Accediendo a vector '%s'", vectorName))
+
+	// Verificar que el vector existe
+	if !t.generator.VariableExists(vectorName) {
+		t.addError(fmt.Sprintf("Vector '%s' no encontrado", vectorName))
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	// Evaluar el índice y dejarlo en X1
+	t.translateExpression(indexExpr)
+	t.generator.Emit("mov x1, x0") // X1 = índice
+
+	// Cargar la dirección del vector en X0
+	t.generator.LoadVariable(arm64.X0, vectorName)
+
+	// X0 = dirección del vector
+	// X1 = índice
+	// Necesitamos X0 = vector[índice + 1] (el +1 es para saltar la longitud)
+
+	// Incrementar índice para saltar la longitud (primer elemento)
+	t.generator.Comment("Saltar longitud del vector (primer elemento)")
+	t.generator.Emit("add x1, x1, #1") // X1 = índice + 1
+
+	// Calcular offset: índice * 8 bytes
+	t.generator.Comment("Cargar elemento del vector")
+	t.generator.Emit("ldr x0, [x0, x1, lsl #3]") // X0 = vector[índice + 1]
+
+	t.generator.Comment(fmt.Sprintf("Vector '%s' accedido exitosamente", vectorName))
 }
