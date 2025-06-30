@@ -379,3 +379,125 @@ Segundo elemento: 2
 - ✅ **Evaluación de expresiones de índice**
 - ✅ **Generación de código ARM64 para acceso**
 - ✅ **Manejo de offset por metadata de longitud**
+
+## Fase 4: Soporte para Asignación de Elementos de Vectores (NEW)
+
+### Problema Detectado
+Después de implementar el acceso por índices (`numeros[0]`), se identificó que faltaba implementar la asignación de elementos (`numeros[0] = 10`). El error específico era:
+
+```
+❌ Errores en traducción ARM64: 1
+   - Nodo no implementado: *compiler.VectorAssignContext
+```
+
+El intérprete funcionaba correctamente mostrando `[ 10 2 3 4 5 ]`, pero faltaba la generación de código ARM64.
+
+### Solución Implementada
+
+#### 1. Agregado Case en `translateNode`
+**Archivo:** `backend/compiler/translator.go`
+**Función:** `translateNode` - línea ~600
+
+```go
+case *compiler.VectorAssignContext:
+    t.translateVectorAssignment(ctx)
+```
+
+#### 2. Implementación de `translateVectorAssignment`
+**Archivo:** `backend/compiler/translator.go`
+**Líneas:** ~2367-2450
+
+Nueva función que maneja la asignación de elementos de vectores:
+
+```go
+func (t *ARM64Translator) translateVectorAssignment(ctx *compiler.VectorAssignContext) {
+    t.generator.Comment("=== ASIGNACIÓN A VECTOR ===")
+
+    // Extraer vector, índice y valor de la asignación
+    var vectorName string
+    var indexExpr antlr.ParseTree
+    var valueExpr antlr.ParseTree
+
+    // Buscar VectorItemContext y expresiones
+    // ... (parseo del AST)
+
+    // Validaciones completas
+    // ... (verificar vector, índice y valor)
+
+    // Paso 1: Evaluar valor a asignar y guardarlo en X2
+    t.translateExpression(valueExpr)
+    t.generator.Emit("mov x2, x0") // X2 = valor
+
+    // Paso 2: Evaluar índice y guardarlo en X1  
+    t.translateExpression(indexExpr)
+    t.generator.Emit("mov x1, x0") // X1 = índice
+
+    // Paso 3: Cargar dirección del vector en X0
+    t.generator.LoadVariable(arm64.X0, vectorName)
+
+    // Paso 4: Calcular posición y asignar
+    t.generator.Emit("add x1, x1, #1")        // Saltar longitud
+    t.generator.Emit("str x2, [x0, x1, lsl #3]") // Asignar valor
+}
+```
+
+#### 3. Lógica de Asignación ARM64
+
+La función genera código ARM64 que:
+1. **Evalúa el valor:** Traduce la expresión del valor a asignar (ej: `10`, `x+5`)
+2. **Evalúa el índice:** Traduce la expresión del índice (ej: `0`, `i`)
+3. **Carga la dirección del vector:** Obtiene la dirección base del vector
+4. **Ajusta por metadata:** Suma 1 al índice para saltar la longitud almacenada
+5. **Almacena el valor:** Escribe el nuevo valor en la posición correcta
+
+### Código ARM64 Generado
+
+Para `numeros[0] = 10` se genera:
+
+```arm64
+// === ASIGNACIÓN A VECTOR ===
+// Asignando valor a vector 'numeros'
+// Evaluar valor a asignar
+mov x0, #10                   // Cargar valor 10
+mov x2, x0                    // X2 = valor a asignar
+// Evaluar índice del vector
+mov x0, #0                    // Cargar índice 0
+mov x1, x0                    // X1 = índice
+// Cargar dirección del vector
+ldr x0, [sp, #8]             // X0 = dirección del vector 'numeros'
+// Saltar longitud del vector (primer elemento)
+add x1, x1, #1               // X1 = índice + 1 (0 + 1 = 1)
+// Asignar valor al elemento del vector
+str x2, [x0, x1, lsl #3]     // vector[1] = 10 (posición real del primer elemento)
+```
+
+### Flujo Completo de Operación
+
+```
+Antes:  vec_numeros: .quad 5, 1, 2, 3, 4, 5
+                          ↑  ↑  ↑  ↑  ↑  ↑
+                     longitud [0][1][2][3][4]
+
+Después: vec_numeros: .quad 5, 10, 2, 3, 4, 5
+                          ↑   ↑  ↑  ↑  ↑  ↑
+                     longitud [0][1][2][3][4]
+```
+
+### Resultado Esperado
+
+Para el código:
+```vlang
+numeros = []int{1, 2, 3, 4, 5}
+print("Original:", numeros)      // [ 1 2 3 4 5 ]
+numeros[0] = 10
+print("Modificado:", numeros)    // [ 10 2 3 4 5 ]
+```
+
+### Estado de Implementación - Fase 4
+- ✅ **Caso agregado en translateNode**
+- ✅ **Función translateVectorAssignment implementada**
+- ✅ **Parseo de AST para vector, índice y valor**
+- ✅ **Validaciones de existencia y estructura**
+- ✅ **Evaluación de expresiones complejas**
+- ✅ **Generación de código ARM64 para asignación**
+- ✅ **Manejo correcto de registros y memoria**

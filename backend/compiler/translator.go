@@ -596,6 +596,8 @@ func (t *ARM64Translator) translateNode(node antlr.ParseTree) {
 		t.translateContinueStatement(ctx)
 	case *compiler.VarVectDeclContext:
 		t.translateVarVectDecl(ctx)
+	case *compiler.VectorAssignContext:
+		t.translateVectorAssignment(ctx)
 
 	default:
 		// Para nodos no implementados, simplemente continuar
@@ -2360,4 +2362,102 @@ func (t *ARM64Translator) translateVectorAccess(ctx *compiler.VectorItemExprCont
 	t.generator.Emit("ldr x0, [x0, x1, lsl #3]") // X0 = vector[índice + 1]
 
 	t.generator.Comment(fmt.Sprintf("Vector '%s' accedido exitosamente", vectorName))
+}
+
+// translateVectorAssignment traduce asignaciones a elementos de vectores: vector[index] = value
+func (t *ARM64Translator) translateVectorAssignment(ctx *compiler.VectorAssignContext) {
+	t.generator.Comment("=== ASIGNACIÓN A VECTOR ===")
+
+	// Extraer nombre del vector, índice y valor de la asignación
+	var vectorName string
+	var indexExpr antlr.ParseTree
+	var valueExpr antlr.ParseTree
+
+	// Buscar VectorItemContext (para obtener vector[index])
+	var vectorItemCtx *compiler.VectorItemContext
+	for i := 0; i < ctx.GetChildCount(); i++ {
+		if child, ok := ctx.GetChild(i).(*compiler.VectorItemContext); ok {
+			vectorItemCtx = child
+			break
+		}
+	}
+
+	if vectorItemCtx == nil {
+		t.addError("No se encontró VectorItemContext en VectorAssignContext")
+		return
+	}
+
+	// Extraer vector y índice del VectorItemContext
+	for i := 0; i < vectorItemCtx.GetChildCount(); i++ {
+		child := vectorItemCtx.GetChild(i)
+
+		if idPattern, ok := child.(*compiler.IdPatternContext); ok {
+			vectorName = idPattern.GetText()
+		} else if parseTree, ok := child.(antlr.ParseTree); ok {
+			// Buscar la expresión del índice (no el '[' o ']')
+			text := parseTree.GetText()
+			if text != "[" && text != "]" {
+				indexExpr = parseTree
+			}
+		}
+	}
+
+	// Buscar la expresión del valor (lado derecho del =)
+	for i := 0; i < ctx.GetChildCount(); i++ {
+		child := ctx.GetChild(i)
+		if exprCtx, ok := child.(*compiler.ExpressionContext); ok {
+			valueExpr = exprCtx
+			break
+		} else if literalCtx, ok := child.(*compiler.LiteralExprContext); ok {
+			valueExpr = literalCtx
+			break
+		}
+	}
+
+	// Validaciones
+	if vectorName == "" {
+		t.addError("No se pudo determinar el nombre del vector en asignación")
+		return
+	}
+
+	if indexExpr == nil {
+		t.addError("No se pudo determinar el índice del vector en asignación")
+		return
+	}
+
+	if valueExpr == nil {
+		t.addError("No se pudo determinar el valor a asignar en vector")
+		return
+	}
+
+	t.generator.Comment(fmt.Sprintf("Asignando valor a vector '%s'", vectorName))
+
+	// Verificar que el vector existe
+	if !t.generator.VariableExists(vectorName) {
+		t.addError(fmt.Sprintf("Vector '%s' no encontrado para asignación", vectorName))
+		return
+	}
+
+	// Paso 1: Evaluar el valor a asignar (lado derecho) y guardarlo en X2
+	t.generator.Comment("Evaluar valor a asignar")
+	t.translateExpression(valueExpr)
+	t.generator.Emit("mov x2, x0") // X2 = valor a asignar
+
+	// Paso 2: Evaluar el índice y guardarlo en X1
+	t.generator.Comment("Evaluar índice del vector")
+	t.translateExpression(indexExpr)
+	t.generator.Emit("mov x1, x0") // X1 = índice
+
+	// Paso 3: Cargar la dirección del vector en X0
+	t.generator.Comment("Cargar dirección del vector")
+	t.generator.LoadVariable(arm64.X0, vectorName) // X0 = dirección del vector
+
+	// Paso 4: Calcular la posición correcta y asignar
+	t.generator.Comment("Saltar longitud del vector (primer elemento)")
+	t.generator.Emit("add x1, x1, #1") // X1 = índice + 1 (saltar metadata de longitud)
+
+	t.generator.Comment("Asignar valor al elemento del vector")
+	t.generator.Emit("str x2, [x0, x1, lsl #3]") // vector[índice + 1] = valor
+
+	t.generator.Comment(fmt.Sprintf("Vector '%s' modificado exitosamente", vectorName))
 }
