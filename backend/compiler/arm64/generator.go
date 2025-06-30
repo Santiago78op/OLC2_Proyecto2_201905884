@@ -14,6 +14,7 @@ type ARM64Generator struct {
 	stringData   []string          // Para almacenar datos de strings
 	stringCount  int               // Contador para strings únicos
 	stringMap    map[string]string // texto -> etiqueta Elimina duplicados
+	vectorData   []string          // Para almacenar datos de vectores
 }
 
 // NewARM64Generator crea un nuevo generador
@@ -26,6 +27,7 @@ func NewARM64Generator() *ARM64Generator {
 		stringData:   make([]string, 0),
 		stringCount:  0,
 		stringMap:    make(map[string]string),
+		vectorData:   make([]string, 0),
 	}
 }
 
@@ -222,6 +224,11 @@ func (g *ARM64Generator) GenerateHeader() {
 		g.EmitRaw(stringDef)
 	}
 
+	// NUEVO: Agregar todos los vectores a la sección .data
+	for _, vectorDef := range g.vectorData {
+		g.EmitRaw(vectorDef)
+	}
+
 	g.EmitRaw("") // Línea vacía para separación
 	g.EmitRaw(".text")
 	g.EmitRaw(".global _start")
@@ -256,7 +263,41 @@ func (g *ARM64Generator) GenerateFooter() {
 
 // GetCode retorna todo el código generado como string
 func (g *ARM64Generator) GetCode() string {
-	return strings.Join(g.instructions, "\n")
+	// Construir código completo con sección .data actualizada
+	var result []string
+
+	// Agregar sección .data con strings y vectores
+	result = append(result, ".data")
+
+	// Agregar strings
+	for _, stringDef := range g.stringData {
+		result = append(result, stringDef)
+	}
+
+	// Agregar vectores
+	for _, vectorDef := range g.vectorData {
+		result = append(result, vectorDef)
+	}
+
+	// Línea vacía para separación
+	result = append(result, "")
+
+	// Agregar el resto del código (sin la primera sección .data)
+	skipDataSection := false
+	for _, instruction := range g.instructions {
+		if instruction == ".data" {
+			skipDataSection = true
+			continue
+		}
+		if instruction == ".text" {
+			skipDataSection = false
+		}
+		if !skipDataSection {
+			result = append(result, instruction)
+		}
+	}
+
+	return strings.Join(result, "\n")
 }
 
 // Reset limpia el generador para empezar un nuevo programa
@@ -268,6 +309,7 @@ func (g *ARM64Generator) Reset() {
 	g.stringData = make([]string, 0)
 	g.stringCount = 0
 	g.stringMap = make(map[string]string) // NUEVO
+	g.vectorData = make([]string, 0)      // NUEVO
 }
 
 // === UTILIDADES DE DEBUG ===
@@ -284,4 +326,33 @@ func (g *ARM64Generator) PrintVariables() {
 // GetVariables retorna todas las variables declaradas (para debug)
 func (g *ARM64Generator) GetVariables() map[string]int {
 	return g.variables
+}
+
+// === SOPORTE PARA VECTORES ===
+
+// AddVectorData agrega un vector de datos a la sección .data
+func (g *ARM64Generator) AddVectorData(vectorName string, elements []int) string {
+	vectorLabel := fmt.Sprintf("vec_%s", vectorName)
+
+	// Crear definición del vector
+	var vectorDef strings.Builder
+	vectorDef.WriteString(fmt.Sprintf("%s: .quad ", vectorLabel))
+
+	for i, element := range elements {
+		if i > 0 {
+			vectorDef.WriteString(", ")
+		}
+		vectorDef.WriteString(fmt.Sprintf("%d", element))
+	}
+
+	// Agregar a la sección de datos de vectores
+	g.vectorData = append(g.vectorData, vectorDef.String())
+
+	fmt.Printf("✅ Vector '%s' agregado como %s con %d elementos\n", vectorName, vectorLabel, len(elements))
+	return vectorLabel
+}
+
+// GetVectorLabel genera una etiqueta única para un vector
+func (g *ARM64Generator) GetVectorLabel(vectorName string) string {
+	return fmt.Sprintf("vec_%s", vectorName)
 }

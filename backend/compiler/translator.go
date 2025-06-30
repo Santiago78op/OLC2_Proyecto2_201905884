@@ -229,6 +229,9 @@ func (t *ARM64Translator) analyzeVariablesAndStrings(node antlr.ParseTree) {
 			}
 		}
 
+	case *compiler.VarVectDeclContext:
+		t.analyzeVarVectDecl(ctx)
+
 	// Otros casos que pueden contener strings
 	case *compiler.IfStmtContext:
 		for _, ifChain := range ctx.AllIf_chain() {
@@ -591,6 +594,8 @@ func (t *ARM64Translator) translateNode(node antlr.ParseTree) {
 		t.translateBreakStatement(ctx)
 	case *compiler.ContinueStmtContext:
 		t.translateContinueStatement(ctx)
+	case *compiler.VarVectDeclContext:
+		t.translateVarVectDecl(ctx)
 
 	default:
 		// Para nodos no implementados, simplemente continuar
@@ -2096,4 +2101,123 @@ func (t *ARM64Translator) GetErrors() []string {
 // HasErrors indica si hay errores
 func (t *ARM64Translator) HasErrors() bool {
 	return len(t.errors) > 0
+}
+
+// === FUNCIONES PARA SOPORTE DE VECTORES ===
+
+// analyzeVarVectDecl analiza declaraciones de vectores en primera pasada
+func (t *ARM64Translator) analyzeVarVectDecl(ctx *compiler.VarVectDeclContext) {
+	varName := ctx.ID().GetText()
+	fmt.Printf("🔍 Analizando declaración de vector: %s\n", varName)
+
+	// Declarar la variable si no existe
+	if !t.generator.VariableExists(varName) {
+		t.generator.DeclareVariable(varName)
+	}
+
+	// Obtener tipo de vector
+	if ctx.Vector_type() != nil {
+		vectorType := ctx.Vector_type().GetText()
+		t.variableTypes[varName] = vectorType
+		fmt.Printf("🔍 Vector '%s' de tipo: %s\n", varName, vectorType)
+	}
+
+	// Analizar elementos del vector para buscar strings
+	if ctx.Vect_expr() != nil {
+		t.analyzeVectorElements(ctx.Vect_expr())
+	}
+}
+
+// analyzeVectorElements analiza los elementos de un vector
+func (t *ARM64Translator) analyzeVectorElements(vectExpr antlr.ParseTree) {
+	switch ctx := vectExpr.(type) {
+	case *compiler.VectorItemLisContext:
+		fmt.Printf("🔍 Analizando elementos del vector\n")
+		// Recorrer todas las expresiones del vector
+		for i := 0; i < ctx.GetChildCount(); i++ {
+			child := ctx.GetChild(i)
+			if parseTreeChild, ok := child.(antlr.ParseTree); ok {
+				t.analyzeStringsInExpression(parseTreeChild)
+			}
+		}
+	}
+}
+
+// translateVarVectDecl traduce declaraciones de vectores
+func (t *ARM64Translator) translateVarVectDecl(ctx *compiler.VarVectDeclContext) {
+	varName := ctx.ID().GetText()
+	t.generator.Comment(fmt.Sprintf("=== DECLARACIÓN DE VECTOR: %s ===", varName))
+
+	// Verificar que la variable fue declarada en primera pasada
+	if !t.generator.VariableExists(varName) {
+		t.addError(fmt.Sprintf("Vector '%s' no fue declarado en primera pasada", varName))
+		return
+	}
+
+	// Extraer elementos del vector
+	elements := t.extractVectorElements(ctx.Vect_expr())
+	if len(elements) == 0 {
+		t.generator.Comment("Vector vacío")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		t.generator.StoreVariable(arm64.X0, varName)
+		return
+	}
+
+	// Crear vector en la sección .data
+	vectorLabel := t.generator.AddVectorData(varName, elements)
+
+	// Cargar dirección del vector en X0
+	t.generator.Comment(fmt.Sprintf("Cargar dirección de vector %s", varName))
+	t.generator.Emit(fmt.Sprintf("adr x0, %s", vectorLabel))
+
+	// Guardar dirección en la variable
+	t.generator.StoreVariable(arm64.X0, varName)
+
+	t.generator.Comment(fmt.Sprintf("Vector %s inicializado con %d elementos", varName, len(elements)))
+}
+
+// extractVectorElements extrae los elementos de un vector
+func (t *ARM64Translator) extractVectorElements(vectExpr antlr.ParseTree) []int {
+	var elements []int
+
+	switch ctx := vectExpr.(type) {
+	case *compiler.VectorItemLisContext:
+		// Recorrer hijos buscando expresiones
+		for i := 0; i < ctx.GetChildCount(); i++ {
+			child := ctx.GetChild(i)
+			if parseTreeChild, ok := child.(antlr.ParseTree); ok {
+				if value := t.extractIntFromExpression(parseTreeChild); value != -999999 {
+					elements = append(elements, value)
+				}
+			}
+		}
+	}
+
+	fmt.Printf("🔍 Elementos extraídos del vector: %v\n", elements)
+	return elements
+}
+
+// extractIntFromExpression extrae un valor entero de una expresión
+func (t *ARM64Translator) extractIntFromExpression(expr antlr.ParseTree) int {
+	switch ctx := expr.(type) {
+	case *compiler.LiteralExprContext:
+		return t.extractIntFromExpression(ctx.Literal())
+	case *compiler.IntLiteralContext:
+		if value, err := strconv.Atoi(ctx.GetText()); err == nil {
+			return value
+		}
+	case *compiler.LiteralContext:
+		// Buscar literal entero en los hijos
+		for i := 0; i < ctx.GetChildCount(); i++ {
+			child := ctx.GetChild(i)
+			if intCtx, ok := child.(*compiler.IntLiteralContext); ok {
+				if value, err := strconv.Atoi(intCtx.GetText()); err == nil {
+					return value
+				}
+			}
+		}
+	}
+
+	// Valor especial para indicar que no se pudo extraer un entero
+	return -999999
 }
