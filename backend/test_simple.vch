@@ -1,0 +1,6 @@
+fn main() {
+    print("Creación con literales:")
+    numeros = []int{1, 2, 3, 4, 5}
+    print("numeros:", numeros)
+}
+main()

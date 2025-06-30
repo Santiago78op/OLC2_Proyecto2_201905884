@@ -1440,13 +1440,16 @@ func (t *ARM64Translator) translatePrintFunction(ctx *compiler.FuncCallContext, 
 
 						// Determinar qué función usar según el tipo
 						if varType, exists := t.variableTypes[varName]; exists {
-							switch varType {
-							case "bool":
+							switch {
+							case varType == "bool":
 								t.generator.Comment(fmt.Sprintf("Imprimiendo variable booleana: %s", varName))
 								t.generator.CallFunction("print_bool")
-							case "string":
+							case varType == "string":
 								t.generator.Comment(fmt.Sprintf("Imprimiendo variable string: %s", varName))
 								t.generator.CallFunction("print_string")
+							case strings.HasPrefix(varType, "[]"):
+								t.generator.Comment(fmt.Sprintf("Imprimiendo variable vector: %s", varName))
+								t.generator.CallFunction("print_vector")
 							default:
 								t.generator.Comment(fmt.Sprintf("Imprimiendo variable numérica: %s", varName))
 								t.generator.CallFunction("print_integer")
@@ -2083,6 +2086,61 @@ print_false_simple:
 
 print_bool_simple_done:
     ldp x29, x30, [sp], #16      // Restaurar registros
+    ret`)
+
+	// FUNCIÓN print_vector
+	t.generator.EmitRaw(`
+print_vector:
+    // Función para imprimir vectores/arrays
+    // Input: x0 = dirección del vector (primer elemento = longitud)
+    stp x29, x30, [sp, #-16]!    // Guardar registros
+    stp x19, x20, [sp, #-16]!
+    stp x21, x22, [sp, #-16]!
+
+    mov x19, x0                   // x19 = dirección del vector
+    
+    // Cargar longitud del vector (primer elemento)
+    ldr x21, [x19]               // x21 = longitud del vector
+    
+    // Imprimir "[ "
+    mov x0, #91                   // ASCII '['
+    bl print_char
+    mov x0, #32                   // ASCII ' '
+    bl print_char
+
+    mov x20, #0                   // x20 = índice actual
+
+print_vector_loop:
+    cmp x20, x21
+    bge print_vector_end
+    
+    // Cargar elemento del vector (saltando el primer elemento que es la longitud)
+    add x22, x20, #1             // x22 = índice + 1 (saltar longitud)
+    ldr x0, [x19, x22, lsl #3]   // x0 = vector[i+1] (cada elemento = 8 bytes)
+    bl print_integer
+    
+    // Incrementar índice
+    add x20, x20, #1
+    
+    // Si no es el último elemento, imprimir espacio
+    cmp x20, x21
+    bge print_vector_no_space
+    mov x0, #32                   // ASCII ' '
+    bl print_char
+    
+print_vector_no_space:
+    b print_vector_loop
+
+print_vector_end:
+    // Imprimir " ]"
+    mov x0, #32                   // ASCII ' '
+    bl print_char
+    mov x0, #93                   // ASCII ']'
+    bl print_char
+
+    ldp x21, x22, [sp], #16      // Restaurar registros
+    ldp x19, x20, [sp], #16
+    ldp x29, x30, [sp], #16
     ret`)
 }
 

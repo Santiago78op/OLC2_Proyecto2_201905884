@@ -334,15 +334,13 @@ func (g *ARM64Generator) GetVariables() map[string]int {
 func (g *ARM64Generator) AddVectorData(vectorName string, elements []int) string {
 	vectorLabel := fmt.Sprintf("vec_%s", vectorName)
 
-	// Crear definición del vector
+	// Crear definición del vector con longitud como primer elemento
 	var vectorDef strings.Builder
-	vectorDef.WriteString(fmt.Sprintf("%s: .quad ", vectorLabel))
+	vectorDef.WriteString(fmt.Sprintf("%s: .quad %d", vectorLabel, len(elements))) // Primer elemento: longitud
 
-	for i, element := range elements {
-		if i > 0 {
-			vectorDef.WriteString(", ")
-		}
-		vectorDef.WriteString(fmt.Sprintf("%d", element))
+	// Agregar los elementos del vector
+	for _, element := range elements {
+		vectorDef.WriteString(fmt.Sprintf(", %d", element))
 	}
 
 	// Agregar a la sección de datos de vectores
