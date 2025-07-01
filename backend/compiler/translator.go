@@ -1385,6 +1385,8 @@ func (t *ARM64Translator) translateNativeFunction(ctx *compiler.FuncCallContext)
 		t.translateIndexOfFunction(ctx)
 	case "len":
 		t.translateLenFunction(ctx)
+	case "append":
+		t.translateAppendFunction(ctx)
 	default:
 		t.addError(fmt.Sprintf("Función no implementada: %s", funcName))
 		t.generator.LoadImmediate(arm64.X0, 0)
@@ -2032,7 +2034,7 @@ print_string:
     // Función para imprimir strings
     // Input: x0 = dirección del string (terminado en null)
     stp x29, x30, [sp, #-16]!    // Guardar registros
-    stp x19, x20, [sp, #-16]!
+    stp x19, x20, [
 
     mov x19, x0                   // x19 = dirección del string
 
@@ -2207,6 +2209,83 @@ print_vector_string_end:
     bl print_char
 
     ldp x21, x22, [sp], #16      // Restaurar registros
+    ldp x19, x20, [sp], #16
+    ldp x29, x30, [sp], #16
+    ret`)
+
+	// FUNCIÓN append_vector
+	t.generator.EmitRaw(`
+append_vector:
+    // Función para agregar un elemento a un vector
+    // Input: x0 = dirección del vector original, x1 = nuevo elemento
+    // Output: x0 = dirección del nuevo vector
+    stp x29, x30, [sp, #-16]!    // Guardar registros
+    stp x19, x20, [sp, #-16]!
+    stp x21, x22, [sp, #-16]!
+    stp x23, x24, [sp, #-16]!
+
+    mov x19, x0                   // x19 = vector original
+    mov x20, x1                   // x20 = nuevo elemento
+
+    // Cargar longitud actual del vector
+    ldr x21, [x19]               // x21 = longitud actual
+    add x22, x21, #1             // x22 = nueva longitud
+
+    // Verificar límite máximo (50 elementos total)
+    cmp x22, #50
+    bgt append_error
+
+    // Calcular tamaño del nuevo vector en bytes
+    // Cada vector: 8 bytes (longitud) + longitud * 8 bytes (elementos)
+    mov x23, #8                  // Tamaño de cada elemento (8 bytes)
+    mul x24, x22, x23            // x24 = nueva_longitud * 8
+    add x24, x24, #8             // x24 = tamaño total (incluye longitud)
+
+    // Reservar espacio en el stack para el nuevo vector
+    neg x24, x24                 // Hacer negativo para restar del SP
+    add sp, sp, x24              // Restar del stack pointer
+    neg x24, x24                 // Restaurar valor positivo
+    mov x0, sp                   // x0 = dirección del nuevo vector
+
+    // Guardar nueva longitud en el nuevo vector
+    str x22, [x0]                // Almacenar nueva longitud
+
+    // Copiar elementos del vector original al nuevo vector
+    mov x23, #1                  // Índice para copiar elementos (empezar en 1)
+    
+copy_loop:
+    cmp x23, x22                 // Comparar índice con nueva longitud
+    bge copy_done                // Si índice >= nueva_longitud, terminar
+
+    cmp x23, x21                 // Comparar con longitud original
+    bgt add_new_element          // Si índice > longitud_original, agregar nuevo elemento
+
+    // Copiar elemento del vector original
+    lsl x25, x23, #3             // x25 = índice * 8 (desplazamiento)
+    ldr x26, [x19, x25]          // Cargar elemento del vector original
+    str x26, [x0, x25]           // Guardar en nuevo vector
+    b next_element
+
+add_new_element:
+    // Agregar el nuevo elemento
+    lsl x25, x23, #3             // x25 = índice * 8 (desplazamiento)
+    str x20, [x0, x25]           // Guardar nuevo elemento
+
+next_element:
+    add x23, x23, #1             // Incrementar índice
+    b copy_loop
+
+copy_done:
+    // x0 ya contiene la dirección del nuevo vector
+    b append_success
+
+append_error:
+    // Error: vector excede tamaño máximo
+    mov x0, #0                   // Retornar NULL
+
+append_success:
+    ldp x23, x24, [sp], #16      // Restaurar registros
+    ldp x21, x22, [sp], #16
     ldp x19, x20, [sp], #16
     ldp x29, x30, [sp], #16
     ret`)
@@ -2810,4 +2889,110 @@ func (t *ARM64Translator) translateLenFunction(ctx *compiler.FuncCallContext) {
 	t.generator.Emit("ldr x0, [x0]") // X0 = longitud del vector
 
 	t.generator.Comment("=== FIN len ===")
+}
+
+// translateAppendFunction maneja la traducción de la función append para vectores
+func (t *ARM64Translator) translateAppendFunction(ctx *compiler.FuncCallContext) {
+	t.generator.Comment("=== FUNCIÓN append ===")
+
+	// Verificar que tenemos exactamente 2 argumentos
+	if ctx.Arg_list() == nil {
+		t.addError("append requiere exactamente 2 argumentos")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	argList, ok := ctx.Arg_list().(*compiler.ArgListContext)
+	if !ok {
+		t.addError("append: no se pudo obtener la lista de argumentos")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	args := argList.AllFunc_arg()
+	if len(args) != 2 {
+		t.addError(fmt.Sprintf("append requiere exactamente 2 argumentos, se proporcionaron %d", len(args)))
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	// Primer argumento: el vector original
+	vectorArg, ok := args[0].(*compiler.FuncArgContext)
+	if !ok {
+		t.addError("append: primer argumento no válido")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	// Segundo argumento: el elemento a agregar
+	elementArg, ok := args[1].(*compiler.FuncArgContext)
+	if !ok {
+		t.addError("append: segundo argumento no válido")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	// Obtener el vector original
+	t.generator.Comment("Cargar vector original")
+	if vectorArg.Expression() != nil {
+		t.translateExpression(vectorArg.Expression())
+	} else if vectorArg.Id_pattern() != nil {
+		varName := vectorArg.Id_pattern().GetText()
+		if t.generator.VariableExists(varName) {
+			t.generator.LoadVariable(arm64.X0, varName)
+		} else {
+			t.addError(fmt.Sprintf("Variable '%s' no encontrada", varName))
+			t.generator.LoadImmediate(arm64.X0, 0)
+			return
+		}
+	}
+
+	// X0 = dirección del vector original
+	t.generator.Emit("mov x19, x0") // X19 = dirección del vector original
+
+	// Cargar longitud del vector original
+	t.generator.Comment("Cargar longitud del vector original")
+	t.generator.Emit("ldr x20, [x19]") // X20 = longitud original
+
+	// Verificar límite máximo (50 elementos)
+	t.generator.Comment("Verificar límite máximo")
+	t.generator.LoadImmediate(arm64.X21, 49) // Máximo 49 elementos
+	t.generator.Emit("cmp x20, x21")
+
+	// Crear etiquetas
+	errorLabel := t.generator.GetLabel()
+	continueLabel := t.generator.GetLabel()
+
+	t.generator.Emit("bgt " + errorLabel) // Si longitud > 49, error
+
+	// Evaluar el segundo argumento (elemento a agregar)
+	t.generator.Comment("Evaluar elemento a agregar")
+	if elementArg.Expression() != nil {
+		t.translateExpression(elementArg.Expression())
+	} else if elementArg.Id_pattern() != nil {
+		varName := elementArg.Id_pattern().GetText()
+		if t.generator.VariableExists(varName) {
+			t.generator.LoadVariable(arm64.X0, varName)
+		} else {
+			t.addError(fmt.Sprintf("Variable '%s' no encontrada", varName))
+			t.generator.LoadImmediate(arm64.X0, 0)
+		}
+	}
+
+	// X0 = nuevo elemento, X19 = vector original
+	t.generator.Emit("mov x1, x0")  // X1 = nuevo elemento
+	t.generator.Emit("mov x0, x19") // X0 = vector original
+
+	// Llamar función append_vector
+	t.generator.Comment("Llamar función append_vector")
+	t.generator.CallFunction("append_vector")
+	t.generator.Emit("b " + continueLabel)
+
+	// Manejo de error
+	t.generator.SetLabel(errorLabel)
+	t.generator.Comment("Error: vector excede tamaño máximo")
+	t.generator.LoadImmediate(arm64.X0, 0)
+
+	t.generator.SetLabel(continueLabel)
+	t.generator.Comment("=== FIN append ===")
 }
