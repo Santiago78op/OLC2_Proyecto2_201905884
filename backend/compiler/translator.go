@@ -2035,7 +2035,7 @@ print_string:
     mov x20, #0                   // x20 = contador de longitud
 
 strlen_loop:
-    ldrb w1, [x
+    ldrb w1, [x19, x20]
     cbz w1, strlen_done          // Si es 0 (null terminator), terminar
     add x20, x20, #1             // Incrementar contador
     b strlen_loop
