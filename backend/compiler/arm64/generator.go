@@ -238,8 +238,12 @@ func (g *ARM64Generator) GenerateHeader() {
 
 	// Configurar el stack inicial si hay variables
 	if g.stackOffset > 0 {
-		g.Comment(fmt.Sprintf("Reservar %d bytes para variables locales", g.stackOffset))
-		g.Emit(fmt.Sprintf("sub sp, sp, #%d", g.stackOffset))
+		// Alinear el stack a 16 bytes (requerimiento ARM64)
+		alignedSize := (g.stackOffset + 15) / 16 * 16
+		g.Comment(fmt.Sprintf("Reservar %d bytes para variables locales (alineado a 16 bytes)", alignedSize))
+		g.Emit(fmt.Sprintf("sub sp, sp, #%d", alignedSize))
+		// Actualizar el offset para que GenerateFooter use el mismo valor
+		g.stackOffset = alignedSize
 	}
 }
 

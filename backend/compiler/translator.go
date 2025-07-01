@@ -2034,7 +2034,7 @@ print_string:
     // Función para imprimir strings
     // Input: x0 = dirección del string (terminado en null)
     stp x29, x30, [sp, #-16]!    // Guardar registros
-    stp x19, x20, [
+    stp x19, x20, [sp, #-16]!    // Guardar x19 y x20
 
     mov x19, x0                   // x19 = dirección del string
 
