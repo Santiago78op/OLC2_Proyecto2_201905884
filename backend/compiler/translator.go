@@ -1387,6 +1387,8 @@ func (t *ARM64Translator) translateNativeFunction(ctx *compiler.FuncCallContext)
 		t.translateLenFunction(ctx)
 	case "append":
 		t.translateAppendFunction(ctx)
+	case "join":
+		t.translateJoinFunction(ctx)
 	default:
 		t.addError(fmt.Sprintf("Función no implementada: %s", funcName))
 		t.generator.LoadImmediate(arm64.X0, 0)
@@ -2289,6 +2291,102 @@ append_success:
     ldp x19, x20, [sp], #16
     ldp x29, x30, [sp], #16
     ret`)
+
+	// FUNCIÓN join_vector
+	t.generator.EmitRaw(`
+join_vector:
+    // Función para unir strings de un vector con un separador
+    // Input: x0 = dirección del vector de strings, x1 = separador
+    // Output: x0 = dirección del string resultado
+    stp x29, x30, [sp, #-16]!    // Guardar registros
+    stp x19, x20, [sp, #-16]!
+    stp x21, x22, [sp, #-16]!
+    stp x23, x24, [sp, #-16]!
+
+    mov x19, x0                   // x19 = vector de strings
+    mov x20, x1                   // x20 = separador
+
+    // Cargar longitud del vector
+    ldr x21, [x19]               // x21 = longitud del vector
+
+    // Si el vector está vacío, retornar string vacío
+    cmp x21, #0
+    beq join_empty_vector
+
+    // Calcular tamaño total necesario (estimación conservadora)
+    // Cada string máximo 100 chars + separador máximo 10 chars
+    mov x22, #110                // 110 chars por elemento
+    mul x23, x21, x22            // x23 = longitud * 110
+    add x23, x23, #8             // +8 para null terminator
+
+    // Reservar espacio en el stack para el resultado
+    neg x23, x23                 // Hacer negativo
+    add sp, sp, x23              // Reservar espacio
+    neg x23, x23                 // Restaurar positivo
+    mov x0, sp                   // x0 = buffer resultado
+
+    // Inicializar buffer con 0
+    mov x22, #0                  // Contador de posición en buffer
+    
+    // Copiar primer string (sin separador)
+    cmp x21, #0
+    beq join_done
+    
+    // Cargar dirección del primer string
+    ldr x24, [x19, #8]           // x24 = dirección primer string
+    bl copy_string_to_buffer     // Copiar string al buffer
+    
+    // Loop para strings restantes (con separador)
+    mov x25, #1                  // Índice = 1 (segundo elemento)
+    
+join_loop:
+    cmp x25, x21                 // Comparar con longitud
+    bge join_done                // Si índice >= longitud, terminar
+    
+    // Copiar separador
+    mov x24, x20                 // x24 = separador
+    bl copy_string_to_buffer     // Copiar separador
+    
+    // Copiar siguiente string
+    add x26, x25, #1             // x26 = índice + 1 (saltar longitud)
+    ldr x24, [x19, x26, lsl #3]  // Cargar dirección del string
+    bl copy_string_to_buffer     // Copiar string
+    
+    add x25, x25, #1             // Incrementar índice
+    b join_loop
+
+copy_string_to_buffer:
+    // Subrutina para copiar un string al buffer
+    // x24 = string source, x0 = buffer base, x22 = offset actual
+copy_char_loop:
+    ldrb w27, [x24], #1          // Cargar char y avanzar
+    cbz w27, copy_char_done      // Si es 0, terminar
+    strb w27, [x0, x22]          // Guardar en buffer
+    add x22, x22, #1             // Incrementar offset
+    b copy_char_loop
+copy_char_done:
+    ret
+
+join_empty_vector:
+    // Vector vacío - retornar string vacío en stack
+    sub sp, sp, #16
+    mov x0, sp
+    mov w1, #0
+    strb w1, [x0]                // Null terminator
+    b join_success
+
+join_done:
+    // Agregar null terminator
+    mov w24, #0
+    strb w24, [x0, x22]
+
+join_success:
+    // x0 ya contiene la dirección del resultado
+    ldp x23, x24, [sp], #16      // Restaurar registros
+    ldp x21, x22, [sp], #16
+    ldp x19, x20, [sp], #16
+    ldp x29, x30, [sp], #16
+    ret`)
 }
 
 // === UTILIDADES ===
@@ -2995,4 +3093,89 @@ func (t *ARM64Translator) translateAppendFunction(ctx *compiler.FuncCallContext)
 
 	t.generator.SetLabel(continueLabel)
 	t.generator.Comment("=== FIN append ===")
+}
+
+// translateJoinFunction maneja la traducción de la función join para vectores de strings
+func (t *ARM64Translator) translateJoinFunction(ctx *compiler.FuncCallContext) {
+	t.generator.Comment("=== FUNCIÓN join ===")
+
+	// Verificar que tenemos exactamente 2 argumentos
+	if ctx.Arg_list() == nil {
+		t.addError("join requiere exactamente 2 argumentos")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	argList, ok := ctx.Arg_list().(*compiler.ArgListContext)
+	if !ok {
+		t.addError("join: no se pudo obtener la lista de argumentos")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	args := argList.AllFunc_arg()
+	if len(args) != 2 {
+		t.addError(fmt.Sprintf("join requiere exactamente 2 argumentos, se proporcionaron %d", len(args)))
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	// Primer argumento: el vector de strings
+	vectorArg, ok := args[0].(*compiler.FuncArgContext)
+	if !ok {
+		t.addError("join: primer argumento no válido")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	// Segundo argumento: el separador
+	separatorArg, ok := args[1].(*compiler.FuncArgContext)
+	if !ok {
+		t.addError("join: segundo argumento no válido")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	// Obtener el vector de strings
+	t.generator.Comment("Cargar vector de strings")
+	if vectorArg.Expression() != nil {
+		t.translateExpression(vectorArg.Expression())
+	} else if vectorArg.Id_pattern() != nil {
+		varName := vectorArg.Id_pattern().GetText()
+		if t.generator.VariableExists(varName) {
+			t.generator.LoadVariable(arm64.X0, varName)
+		} else {
+			t.addError(fmt.Sprintf("Variable '%s' no encontrada", varName))
+			t.generator.LoadImmediate(arm64.X0, 0)
+			return
+		}
+	}
+
+	// X0 = dirección del vector de strings
+	t.generator.Emit("mov x19, x0") // X19 = dirección del vector
+
+	// Evaluar el separador
+	t.generator.Comment("Evaluar separador")
+	if separatorArg.Expression() != nil {
+		t.translateExpression(separatorArg.Expression())
+	} else if separatorArg.Id_pattern() != nil {
+		varName := separatorArg.Id_pattern().GetText()
+		if t.generator.VariableExists(varName) {
+			t.generator.LoadVariable(arm64.X0, varName)
+		} else {
+			t.addError(fmt.Sprintf("Variable '%s' no encontrada", varName))
+			t.generator.LoadImmediate(arm64.X0, 0)
+			return
+		}
+	}
+
+	// X0 = separador, X19 = vector de strings
+	t.generator.Emit("mov x1, x0")  // X1 = separador
+	t.generator.Emit("mov x0, x19") // X0 = vector de strings
+
+	// Llamar función join_vector
+	t.generator.Comment("Llamar función join_vector")
+	t.generator.CallFunction("join_vector")
+
+	t.generator.Comment("=== FIN join ===")
 }
