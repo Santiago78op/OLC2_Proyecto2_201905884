@@ -311,6 +311,9 @@ func (t *ARM64Translator) inferExpressionType(expr antlr.ParseTree) string {
 	case *compiler.BinaryExprContext:
 		// Para operaciones binarias, usar el tipo del operando izquierdo
 		return t.inferExpressionType(ctx.GetLeft())
+	case *compiler.FuncCallExprContext:
+		// Inferir tipo basado en la llamada a función
+		return t.inferFunctionCallType(ctx.Func_call())
 	default:
 		return "unknown"
 	}
@@ -338,6 +341,33 @@ func (t *ARM64Translator) inferLiteralType(ctx *compiler.LiteralContext) string 
 	// Por defecto, int
 	if _, err := strconv.Atoi(text); err == nil {
 		return "int"
+	}
+
+	return "unknown"
+}
+
+// Inferir tipo de llamada a función
+func (t *ARM64Translator) inferFunctionCallType(funcCall antlr.ParseTree) string {
+	if funcCall == nil {
+		return "unknown"
+	}
+
+	if funcCallCtx, ok := funcCall.(*compiler.FuncCallContext); ok {
+		funcName := funcCallCtx.Id_pattern().GetText()
+
+		// Funciones nativas que devuelven string
+		switch funcName {
+		case "join":
+			return "string"
+		case "append":
+			// append devuelve un vector del mismo tipo que el primer argumento
+			return "[]int" // Por simplicidad, asumir int por ahora
+		case "print", "println":
+			return "void"
+		default:
+			// Para funciones de usuario, asumir int por defecto
+			return "int"
+		}
 	}
 
 	return "unknown"
@@ -2010,33 +2040,6 @@ print_done:
 
 	// FUNCIÓN print_char
 	t.generator.EmitRaw(`
-print_char:
-    // Imprimir un carácter
-    // Input: x0 = carácter ASCII
-    stp x29, x30, [sp, #-16]!
-
-    // Crear buffer temporal en el stack
-    sub sp, sp, #16
-    strb w0, [sp]                // Guardar carácter
-
-    // Syscall write
-    mov x0, #1                   // stdout
-    mov x1, sp                   // buffer
-    mov x2, #1                   // length
-    mov x8, #64                  // write syscall
-    svc #0
-
-    add sp, sp, #16              // Limpiar buffer
-    ldp x29, x30, [sp], #16
-    ret`)
-
-	// FUNCIÓN print_string
-	t.generator.EmitRaw(`
-print_string:
-    // Función para imprimir strings
-    // Input: x0 = dirección del string (terminado en null)
-    stp x29, x30, [sp, #-16]!    // Guardar registros
-    stp x19, x20, [sp, #-16]!    // Guardar x19 y x20
 
     mov x19, x0                   // x19 = dirección del string
 
