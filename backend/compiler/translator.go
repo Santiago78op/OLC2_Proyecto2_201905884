@@ -1214,7 +1214,7 @@ func (t *ARM64Translator) translateComparison(reg1, reg2, condition string) {
 	t.generator.Compare(reg1, reg2)
 
 	// Usar CSET para convertir el resultado de la comparación a 1 o 0
-	t.generator.Comment(fmt.Sprintf("Convertir resultado de comparación a 1/0"))
+	t.generator.Comment("Convertir resultado de comparación a 1/0")
 	t.generator.Emit(fmt.Sprintf("cset %s, %s", arm64.X0, condition))
 }
 
@@ -1383,6 +1383,8 @@ func (t *ARM64Translator) translateNativeFunction(ctx *compiler.FuncCallContext)
 		t.generator.LoadImmediate(arm64.X0, 1) // 1=int, 2=float, etc.
 	case "indexOf":
 		t.translateIndexOfFunction(ctx)
+	case "len":
+		t.translateLenFunction(ctx)
 	default:
 		t.addError(fmt.Sprintf("Función no implementada: %s", funcName))
 		t.generator.LoadImmediate(arm64.X0, 0)
@@ -2033,7 +2035,7 @@ print_string:
     mov x20, #0                   // x20 = contador de longitud
 
 strlen_loop:
-    ldrb w1, [x19, x20]          // Cargar byte del string
+    ldrb w1, [x
     cbz w1, strlen_done          // Si es 0 (null terminator), terminar
     add x20, x20, #1             // Incrementar contador
     b strlen_loop
@@ -2218,26 +2220,56 @@ func (t *ARM64Translator) translateVarVectDecl(ctx *compiler.VarVectDeclContext)
 		return
 	}
 
-	// Extraer elementos del vector
-	elements := t.extractVectorElements(ctx.Vect_expr())
-	if len(elements) == 0 {
-		t.generator.Comment("Vector vacío")
-		t.generator.LoadImmediate(arm64.X0, 0)
-		t.generator.StoreVariable(arm64.X0, varName)
-		return
+	// Obtener tipo de vector
+	vectorType := ""
+	if ctx.Vector_type() != nil {
+		vectorType = ctx.Vector_type().GetText()
 	}
 
-	// Crear vector en la sección .data
-	vectorLabel := t.generator.AddVectorData(varName, elements)
+	// Determinar si es vector de strings o enteros
+	if strings.Contains(vectorType, "string") {
+		// Manejar vector de strings
+		stringLabels := t.extractVectorStringLabels(ctx.Vect_expr())
+		if len(stringLabels) == 0 {
+			t.generator.Comment("Vector de strings vacío")
+			t.generator.LoadImmediate(arm64.X0, 0)
+			t.generator.StoreVariable(arm64.X0, varName)
+			return
+		}
 
-	// Cargar dirección del vector en X0
-	t.generator.Comment(fmt.Sprintf("Cargar dirección de vector %s", varName))
-	t.generator.Emit(fmt.Sprintf("adr x0, %s", vectorLabel))
+		// Crear vector de strings en la sección .data
+		vectorLabel := t.generator.AddVectorStringData(varName, stringLabels)
 
-	// Guardar dirección en la variable
-	t.generator.StoreVariable(arm64.X0, varName)
+		// Cargar dirección del vector en X0
+		t.generator.Comment(fmt.Sprintf("Cargar dirección de vector %s", varName))
+		t.generator.Emit(fmt.Sprintf("adr x0, %s", vectorLabel))
 
-	t.generator.Comment(fmt.Sprintf("Vector %s inicializado con %d elementos", varName, len(elements)))
+		// Guardar dirección en la variable
+		t.generator.StoreVariable(arm64.X0, varName)
+
+		t.generator.Comment(fmt.Sprintf("Vector de strings %s inicializado con %d elementos", varName, len(stringLabels)))
+	} else {
+		// Manejar vector de enteros (código existente)
+		elements := t.extractVectorElements(ctx.Vect_expr())
+		if len(elements) == 0 {
+			t.generator.Comment("Vector vacío")
+			t.generator.LoadImmediate(arm64.X0, 0)
+			t.generator.StoreVariable(arm64.X0, varName)
+			return
+		}
+
+		// Crear vector en la sección .data
+		vectorLabel := t.generator.AddVectorData(varName, elements)
+
+		// Cargar dirección del vector en X0
+		t.generator.Comment(fmt.Sprintf("Cargar dirección de vector %s", varName))
+		t.generator.Emit(fmt.Sprintf("adr x0, %s", vectorLabel))
+
+		// Guardar dirección en la variable
+		t.generator.StoreVariable(arm64.X0, varName)
+
+		t.generator.Comment(fmt.Sprintf("Vector %s inicializado con %d elementos", varName, len(elements)))
+	}
 }
 
 // extractVectorElements extrae los elementos de un vector
@@ -2284,6 +2316,63 @@ func (t *ARM64Translator) extractIntFromExpression(expr antlr.ParseTree) int {
 
 	// Valor especial para indicar que no se pudo extraer un entero
 	return -999999
+}
+
+// extractVectorStringLabels extrae las etiquetas de strings de un vector de strings
+func (t *ARM64Translator) extractVectorStringLabels(vectExpr antlr.ParseTree) []string {
+	var stringLabels []string
+
+	switch ctx := vectExpr.(type) {
+	case *compiler.VectorItemLisContext:
+		// Recorrer hijos buscando expresiones de strings
+		for i := 0; i < ctx.GetChildCount(); i++ {
+			child := ctx.GetChild(i)
+			if parseTreeChild, ok := child.(antlr.ParseTree); ok {
+				if label := t.extractStringLabelFromExpression(parseTreeChild); label != "" {
+					stringLabels = append(stringLabels, label)
+				}
+			}
+		}
+	}
+
+	fmt.Printf("🔍 Etiquetas de strings extraídas del vector: %v\n", stringLabels)
+	return stringLabels
+}
+
+// extractStringLabelFromExpression extrae la etiqueta de un string de una expresión
+func (t *ARM64Translator) extractStringLabelFromExpression(expr antlr.ParseTree) string {
+	switch ctx := expr.(type) {
+	case *compiler.LiteralExprContext:
+		return t.extractStringLabelFromExpression(ctx.Literal())
+	case *compiler.StringLiteralContext:
+		// Obtener el texto del string
+		text := ctx.GetText()
+		if len(text) >= 2 {
+			text = text[1 : len(text)-1] // Quitar comillas
+		}
+		// Buscar si ya existe la etiqueta para este string
+		if label, exists := t.stringRegistry[text]; exists {
+			return label
+		}
+	case *compiler.LiteralContext:
+		// Buscar literal de string en los hijos
+		for i := 0; i < ctx.GetChildCount(); i++ {
+			child := ctx.GetChild(i)
+			if stringCtx, ok := child.(*compiler.StringLiteralContext); ok {
+				text := stringCtx.GetText()
+				if len(text) >= 2 {
+					text = text[1 : len(text)-1] // Quitar comillas
+				}
+				// Buscar si ya existe la etiqueta para este string
+				if label, exists := t.stringRegistry[text]; exists {
+					return label
+				}
+			}
+		}
+	}
+
+	// Retornar cadena vacía si no se pudo extraer
+	return ""
 }
 
 // translateVectorAccess traduce acceso a elementos de vectores: vector[index]
@@ -2598,4 +2687,67 @@ func (t *ARM64Translator) translateIndexOfFunction(ctx *compiler.FuncCallContext
 	// Fin de la función
 	t.generator.SetLabel(endLabel)
 	t.generator.Comment("=== FIN indexOf ===")
+}
+
+// translateLenFunction maneja la traducción de la función len para vectores
+func (t *ARM64Translator) translateLenFunction(ctx *compiler.FuncCallContext) {
+	t.generator.Comment("=== FUNCIÓN len ===")
+
+	// Verificar que tenemos exactamente 1 argumento
+	if ctx.Arg_list() == nil {
+		t.addError("len requiere exactamente 1 argumento")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	argList, ok := ctx.Arg_list().(*compiler.ArgListContext)
+	if !ok {
+		t.addError("len: no se pudo obtener la lista de argumentos")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	args := argList.AllFunc_arg()
+	if len(args) != 1 {
+		t.addError(fmt.Sprintf("len requiere exactamente 1 argumento, se proporcionaron %d", len(args)))
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	// Obtener el primer argumento (el vector)
+	vectorArg, ok := args[0].(*compiler.FuncArgContext)
+	if !ok {
+		t.addError("len: argumento no válido")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	// Verificar que las expresiones no sean nil
+	if vectorArg.Expression() == nil && vectorArg.Id_pattern() == nil {
+		t.addError("len: argumento no tiene expresión ni identificador válido")
+		t.generator.LoadImmediate(arm64.X0, 0)
+		return
+	}
+
+	// Cargar la dirección del vector
+	t.generator.Comment("Obtener dirección del vector")
+	if vectorArg.Expression() != nil {
+		t.translateExpression(vectorArg.Expression())
+	} else if vectorArg.Id_pattern() != nil {
+		// Manejar identificador (variable)
+		varName := vectorArg.Id_pattern().GetText()
+		if t.generator.VariableExists(varName) {
+			t.generator.LoadVariable(arm64.X0, varName)
+		} else {
+			t.addError(fmt.Sprintf("Variable '%s' no encontrada", varName))
+			t.generator.LoadImmediate(arm64.X0, 0)
+			return
+		}
+	}
+
+	// El primer elemento del vector es su longitud
+	t.generator.Comment("Cargar longitud del vector (primer elemento)")
+	t.generator.Emit("ldr x0, [x0]") // X0 = longitud del vector
+
+	t.generator.Comment("=== FIN len ===")
 }

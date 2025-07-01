@@ -354,3 +354,23 @@ func (g *ARM64Generator) AddVectorData(vectorName string, elements []int) string
 func (g *ARM64Generator) GetVectorLabel(vectorName string) string {
 	return fmt.Sprintf("vec_%s", vectorName)
 }
+
+// AddVectorStringData agrega un vector de strings a la sección .data
+func (g *ARM64Generator) AddVectorStringData(vectorName string, stringLabels []string) string {
+	vectorLabel := fmt.Sprintf("vec_%s", vectorName)
+
+	// Crear definición del vector con longitud como primer elemento
+	var vectorDef strings.Builder
+	vectorDef.WriteString(fmt.Sprintf("%s: .quad %d", vectorLabel, len(stringLabels))) // Primer elemento: longitud
+
+	// Agregar las direcciones de los strings
+	for _, stringLabel := range stringLabels {
+		vectorDef.WriteString(fmt.Sprintf(", %s", stringLabel))
+	}
+
+	// Agregar a la sección de datos de vectores
+	g.vectorData = append(g.vectorData, vectorDef.String())
+
+	fmt.Printf("✅ Vector de strings '%s' agregado como %s con %d elementos\n", vectorName, vectorLabel, len(stringLabels))
+	return vectorLabel
+}
